@@ -1,0 +1,146 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="manipulator_x">
+
+    <gravity>0 0 0</gravity>
+
+    <physics name="vision_physics" type="ignored">
+      <max_step_size>0.002</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin
+      filename="libignition-gazebo-physics-system.so"
+      name="ignition::gazebo::systems::Physics"/>
+
+    <plugin
+      filename="libignition-gazebo-user-commands-system.so"
+      name="ignition::gazebo::systems::UserCommands"/>
+
+    <plugin
+      filename="libignition-gazebo-scene-broadcaster-system.so"
+      name="ignition::gazebo::systems::SceneBroadcaster"/>
+
+    <plugin
+      filename="libignition-gazebo-sensors-system.so"
+      name="ignition::gazebo::systems::Sensors">
+      <render_engine>ogre</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 5 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.3 0.1 -1</direction>
+    </light>
+
+    <model name="table">
+      <static>true</static>
+      <pose>0.45 0 0.18 0 0 0</pose>
+      <link name="surface">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.50 0.60 0.04</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.50 0.60 0.04</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.65 0.68 0.70 1</ambient>
+            <diffuse>0.65 0.68 0.70 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="red_object">
+      <static>true</static>
+      <pose>0.55 -0.075 0.235 0 0 0</pose>
+      <link name="body">
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.018</radius>
+              <length>0.07</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.018</radius>
+              <length>0.07</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.8 0.05 0.05 1</ambient>
+            <diffuse>0.9 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="blue_object">
+      <static>true</static>
+      <pose>0.55 0 0.235 0 0 0</pose>
+      <link name="body">
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.018</radius>
+              <length>0.07</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.018</radius>
+              <length>0.07</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.05 0.1 0.8 1</ambient>
+            <diffuse>0.05 0.1 0.9 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="green_object">
+      <static>true</static>
+      <pose>0.55 0.075 0.235 0 0 0</pose>
+      <link name="body">
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.018</radius>
+              <length>0.07</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.018</radius>
+              <length>0.07</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.05 0.7 0.1 1</ambient>
+            <diffuse>0.05 0.8 0.1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

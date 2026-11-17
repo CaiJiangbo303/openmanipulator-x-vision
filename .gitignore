@@ -1,0 +1,13 @@
+vision_ws/build/
+vision_ws/install/
+vision_ws/log/
+
+__pycache__/
+*.pyc
+*.pyo
+
+.vscode/
+.idea/
+
+*.bag
+*.db3
