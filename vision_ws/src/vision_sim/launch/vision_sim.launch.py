@@ -172,7 +172,21 @@ def generate_launch_description():
         ]
     )
 
+
+    simulation_arm_tf_bridge = Node(
+        package='vision_sim',
+        executable='simulation_arm_tf.py',
+        name='simulation_arm_tf_bridge',
+        output='screen',
+        parameters=[
+            {
+                'use_sim_time': True
+            }
+        ],
+    )
+
     return LaunchDescription([
+        simulation_arm_tf_bridge,
 
         gazebo,
 

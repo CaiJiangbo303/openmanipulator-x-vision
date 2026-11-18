@@ -17,4 +17,10 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
+
+install(PROGRAMS
+  scripts/simulation_arm_tf.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

@@ -1,3 +1,4 @@
+from collections import deque
 #!/usr/bin/env python3
 
 import math
@@ -243,12 +244,19 @@ class ObjectSelfFilter(Node):
             10
         )
 
-        # Exact-stamp TF synchronization.
+                # Exact-stamp TF synchronization.
         #
-        # Protect one input while waiting for its TF,
-        # but retain only the newest following input.
+        # Keep one protected pending measurement plus
+        # a small bounded FIFO for following measurements.
         self.pending_message = None
-        self.latest_waiting_message = None
+        self.pending_since_ns = None
+
+        self.waiting_messages = deque(
+            maxlen=8
+        )
+
+        self.queue_overflow_count = 0
+        self.tf_timeout_drop_count = 0
 
         self.process_timer = self.create_timer(
             0.01,
@@ -283,23 +291,57 @@ class ObjectSelfFilter(Node):
         msg
     ):
 
+        arrival_ns = (
+            self.get_clock()
+            .now()
+            .nanoseconds
+        )
+
         if self.pending_message is None:
 
             self.pending_message = msg
+            self.pending_since_ns = arrival_ns
 
-        else:
+            return
 
-            self.latest_waiting_message = msg
+        if (
+            len(self.waiting_messages)
+            ==
+            self.waiting_messages.maxlen
+        ):
 
-    def promote_latest(
+            self.waiting_messages.popleft()
+
+            self.queue_overflow_count += 1
+
+            self.get_logger().warning(
+                'Self-filter queue overflow: '
+                'dropped oldest waiting measurement '
+                f'(total={self.queue_overflow_count})'
+            )
+
+        self.waiting_messages.append(
+            (
+                msg,
+                arrival_ns,
+            )
+        )
+
+    def promote_next(
         self
     ):
 
-        self.pending_message = (
-            self.latest_waiting_message
-        )
+        if self.waiting_messages:
 
-        self.latest_waiting_message = None
+            (
+                self.pending_message,
+                self.pending_since_ns,
+            ) = self.waiting_messages.popleft()
+
+        else:
+
+            self.pending_message = None
+            self.pending_since_ns = None
 
     def lookup_frame_position(
         self,
@@ -399,8 +441,7 @@ class ObjectSelfFilter(Node):
 
         if not msg.header.frame_id:
 
-            self.pending_message = None
-            self.promote_latest()
+            self.promote_next()
 
             return
 
@@ -416,8 +457,7 @@ class ObjectSelfFilter(Node):
                 f'got={msg.header.frame_id}'
             )
 
-            self.pending_message = None
-            self.promote_latest()
+            self.promote_next()
 
             return
 
@@ -433,41 +473,57 @@ class ObjectSelfFilter(Node):
 
         except Exception:
 
-            now = self.get_clock().now()
+            now_ns = (
+                self.get_clock()
+                .now()
+                .nanoseconds
+            )
 
-            age = (
-                now.nanoseconds
+            if self.pending_since_ns is None:
+
+                self.pending_since_ns = now_ns
+
+            waited = (
+                now_ns
+                -
+                self.pending_since_ns
+            ) * 1e-9
+
+            measurement_age = (
+                now_ns
                 -
                 stamp.nanoseconds
             ) * 1e-9
 
             if (
-                age
+                waited
                 <=
                 self.tf_wait_timeout
             ):
 
                 return
 
+            self.tf_timeout_drop_count += 1
+
             self.get_logger().warning(
                 'Drop measurement: exact robot TF '
                 'unavailable '
-                f'after {age:.3f}s'
+                f'after waiting {waited:.3f}s '
+                f'(measurement age='
+                f'{measurement_age:.3f}s, '
+                f'total={self.tf_timeout_drop_count})'
             )
 
-            self.pending_message = None
-            self.promote_latest()
+            self.promote_next()
 
             return
-
-        self.pending_message = None
 
         self.filter_message(
             msg,
             segments
         )
 
-        self.promote_latest()
+        self.promote_next()
 
     def is_robot_self(
         self,
