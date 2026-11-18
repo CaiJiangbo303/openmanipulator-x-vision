@@ -58,6 +58,8 @@ PATTERNS=(
     "/vision_debug_viewer/"
     "vision_sim.launch.py"
     "simulation_arm_tf.py"
+    "realsense2_camera"
+    "rs_launch.py"
     "simulation_tf.py"
     "__node:=vision_robot_state_publisher"
 )

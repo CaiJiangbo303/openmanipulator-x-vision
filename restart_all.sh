@@ -19,6 +19,12 @@ echo "[1/3] Cleaning old stack..."
 
 "$ROOT/clear_all.sh"
 
+echo
+echo "Starting ROS 2 daemon..."
+
+source /opt/ros/humble/setup.bash
+ros2 daemon start >/dev/null 2>&1 || true
+
 sleep 2
 
 start_node() {
