@@ -112,7 +112,7 @@ class ObjectStateManager(Node):
 
         self.declare_parameter(
             'max_prediction_time',
-            0.50
+            1.00
         )
 
         self.measurement_topic = (

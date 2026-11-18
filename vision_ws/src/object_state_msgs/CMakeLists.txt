@@ -12,6 +12,8 @@ find_package(builtin_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ObjectState.msg"
   "msg/ObjectStateArray.msg"
+  "msg/ObjectPrediction.msg"
+  "msg/ObjectPredictionArray.msg"
 
   DEPENDENCIES
   std_msgs
