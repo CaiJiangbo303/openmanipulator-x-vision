@@ -70,6 +70,13 @@ class ObjectDetectorNode(Node):
             '16'
         )
 
+        # Optional post-YOLO geometric gate.
+        # 0 keeps the original behaviour.
+        self.declare_parameter(
+            'min_bbox_area',
+            0.0
+        )
+
         self.backend_name = (
             self.get_parameter(
                 'backend'
@@ -79,6 +86,12 @@ class ObjectDetectorNode(Node):
         self.image_topic = (
             self.get_parameter(
                 'image_topic'
+            ).value
+        )
+
+        self.min_bbox_area = float(
+            self.get_parameter(
+                'min_bbox_area'
             ).value
         )
 
@@ -220,6 +233,43 @@ class ObjectDetectorNode(Node):
             )
         )
 
+        # Keep the backend generic.  Geometric filtering is
+        # applied here before detections reach the tracker
+        # and SAM2.
+        filtered_by_area = 0
+
+        if self.min_bbox_area > 0.0:
+
+            kept = []
+
+            for det in detections:
+
+                x1, y1, x2, y2 = (
+                    det.bbox_xyxy
+                )
+
+                width = max(
+                    0.0,
+                    x2 - x1
+                )
+
+                height = max(
+                    0.0,
+                    y2 - y1
+                )
+
+                area = width * height
+
+                if area >= self.min_bbox_area:
+
+                    kept.append(det)
+
+                else:
+
+                    filtered_by_area += 1
+
+            detections = kept
+
         total_ms = (
             perf_counter() - start
         ) * 1000.0
@@ -242,6 +292,7 @@ class ObjectDetectorNode(Node):
                 f'frame={self.frame_count} | '
                 f'backend={self.backend_name} | '
                 f'detections={len(detections)} | '
+                f'area_filtered={filtered_by_area} | '
                 f'total={total_ms:.1f} ms'
             )
 

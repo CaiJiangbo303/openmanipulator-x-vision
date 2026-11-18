@@ -1,0 +1,21 @@
+object_detector:
+  ros__parameters:
+
+    backend: "yolo"
+    image_topic: /camera/image
+
+    model: yolo11s.pt
+
+    # Webcam demo:
+    # suppress weak / unstable detections before tracking.
+    confidence: 0.50
+
+    iou: 0.45
+    imgsz: 640
+
+    device: "0"
+    quantize: "16"
+
+    # 640x480 image:
+    # reject very small detections before Tracker / SAM2.
+    min_bbox_area: 1200.0
