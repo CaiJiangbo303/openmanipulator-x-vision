@@ -1,0 +1,24 @@
+mask_localizer:
+  ros__parameters:
+
+    detections_topic: /object_tracker/detections
+    mask_topic: /object_segmenter/instance_mask
+
+    # RealSense depth aligned into COLOR pixel coordinates.
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+
+    # Use COLOR intrinsics because depth has been aligned
+    # into the color image coordinate system.
+    camera_info_topic: /camera/camera/color/camera_info
+
+    output_topic: /object_localizer/detections_3d_mask
+
+    # Real hardware should trust the frame carried by the
+    # aligned depth message rather than a hard-coded frame.
+    use_depth_frame_id: true
+
+    world_frame: world
+
+    min_depth: 0.05
+    max_depth: 3.0
+    min_valid_pixels: 10

@@ -74,6 +74,15 @@ class MaskLocalizerNode(Node):
             'world'
         )
 
+        # In real RealSense mode, the aligned depth image
+        # already carries the correct optical frame.
+        # Keep False by default so existing simulation
+        # behaviour is unchanged.
+        self.declare_parameter(
+            'use_depth_frame_id',
+            False
+        )
+
         self.declare_parameter(
             'min_depth',
             0.05
@@ -128,6 +137,12 @@ class MaskLocalizerNode(Node):
         self.world_frame = (
             self.get_parameter(
                 'world_frame'
+            ).value
+        )
+
+        self.use_depth_frame_id = bool(
+            self.get_parameter(
+                'use_depth_frame_id'
             ).value
         )
 
@@ -324,31 +339,86 @@ class MaskLocalizerNode(Node):
         msg
     ):
 
-        if msg.encoding != '32FC1':
+        # Gazebo / some pipelines:
+        #   32FC1, meters.
+        #
+        # RealSense raw/aligned depth:
+        #   16UC1, millimeters.
+        #
+        # Internally this node always returns float32 meters.
 
-            self.get_logger().warning(
-                'Unsupported depth encoding: '
-                f'{msg.encoding}'
+        if msg.encoding == '32FC1':
+
+            dtype = (
+                '>f4'
+                if msg.is_bigendian
+                else '<f4'
             )
 
-            return None
+            row_width = (
+                msg.step // 4
+            )
 
-        row_width = (
-            msg.step // 4
+            depth = np.frombuffer(
+                msg.data,
+                dtype=dtype
+            ).reshape(
+                msg.height,
+                row_width
+            )
+
+            depth = depth[
+                :,
+                :msg.width
+            ].astype(
+                np.float32,
+                copy=False
+            )
+
+            return depth
+
+        if msg.encoding == '16UC1':
+
+            dtype = (
+                '>u2'
+                if msg.is_bigendian
+                else '<u2'
+            )
+
+            row_width = (
+                msg.step // 2
+            )
+
+            depth_mm = np.frombuffer(
+                msg.data,
+                dtype=dtype
+            ).reshape(
+                msg.height,
+                row_width
+            )
+
+            depth_mm = depth_mm[
+                :,
+                :msg.width
+            ]
+
+            # RealSense depth units are represented here
+            # as millimetres in the ROS image.
+            depth_m = (
+                depth_mm.astype(
+                    np.float32
+                )
+                * 0.001
+            )
+
+            return depth_m
+
+        self.get_logger().warning(
+            'Unsupported depth encoding: '
+            f'{msg.encoding}'
         )
 
-        depth = np.frombuffer(
-            msg.data,
-            dtype=np.float32
-        ).reshape(
-            msg.height,
-            row_width
-        )
-
-        return depth[
-            :,
-            :msg.width
-        ]
+        return None
 
     def mask_to_numpy(
         self,
@@ -555,7 +625,7 @@ class MaskLocalizerNode(Node):
         transform = (
             self.tf_buffer.lookup_transform(
                 self.world_frame,
-                self.optical_frame,
+                point.header.frame_id,
                 stamp,
                 timeout=Duration(
                     seconds=0.05
@@ -600,7 +670,7 @@ class MaskLocalizerNode(Node):
         output = Detection3DArray()
 
         output.header.stamp = (
-            detections_msg.header.stamp
+            depth_msg.header.stamp
         )
 
         output.header.frame_id = (
@@ -634,12 +704,24 @@ class MaskLocalizerNode(Node):
             point = PointStamped()
 
             point.header.stamp = (
-                detections_msg.header.stamp
+                depth_msg.header.stamp
             )
 
-            point.header.frame_id = (
-                self.optical_frame
-            )
+            if (
+                self.use_depth_frame_id
+                and
+                depth_msg.header.frame_id
+            ):
+
+                point.header.frame_id = (
+                    depth_msg.header.frame_id
+                )
+
+            else:
+
+                point.header.frame_id = (
+                    self.optical_frame
+                )
 
             point.point.x = estimate['x']
             point.point.y = estimate['y']
