@@ -791,9 +791,14 @@ class FourDofFeasibilityNode(Node):
         # TF listener itself is never blocked by this callback.
         # -------------------------------------------------
 
-        self.pending_messages = deque(
-            maxlen=1
-        )
+        # One message is actively waiting for its
+        # exact-stamp TF. While it waits, retain only
+        # the newest incoming prediction.
+        #
+        # This gives TF time to catch up without ever
+        # building an unbounded stale backlog.
+        self.pending_message = None
+        self.latest_waiting_message = None
 
         self.tf_wait_timeout = 0.50
 
@@ -898,35 +903,51 @@ class FourDofFeasibilityNode(Node):
         msg
     ):
 
-        # Do not perform TF lookup here.
+        # -------------------------------------------------
+        # Two-slot freshness policy.
         #
-        # A prediction can arrive slightly ahead of the
-        # dynamic arm TF. Blocking here would also prevent
-        # this node's TF listener from receiving new TF data.
+        # pending_message:
+        #   protected while waiting for its exact TF
         #
-        # Queue the message and let process_pending()
-        # retry the exact timestamp asynchronously.
+        # latest_waiting_message:
+        #   always replaced by the newest prediction
+        #
+        # Intermediate frames are intentionally dropped.
+        # -------------------------------------------------
 
-        self.pending_messages.append(
-            msg
+        if self.pending_message is None:
+
+            self.pending_message = msg
+
+        else:
+
+            self.latest_waiting_message = msg
+
+    def promote_latest(
+        self
+    ):
+
+        self.pending_message = (
+            self.latest_waiting_message
         )
+
+        self.latest_waiting_message = None
 
     def process_pending(
         self
     ):
 
-        if not self.pending_messages:
+        if self.pending_message is None:
             return
 
-        # Process oldest first. Normally TF catches up
-        # within a few milliseconds, so this queue should
-        # remain very short.
-
-        msg = self.pending_messages[0]
+        msg = self.pending_message
 
         if not msg.header.frame_id:
 
-            self.pending_messages.popleft()
+            self.pending_message = None
+
+            self.promote_latest()
+
             return
 
         stamp = Time.from_msg(
@@ -956,16 +977,11 @@ class FourDofFeasibilityNode(Node):
                 stamp.nanoseconds
             ) * 1e-9
 
-            # The requested timestamp is probably still
-            # slightly ahead of the TF listener.
+            # TF may simply be a few milliseconds behind.
+            # Keep this exact timestamp protected while
+            # waiting.
             if age <= self.tf_wait_timeout:
                 return
-
-            # If TF still does not exist after 0.5 s,
-            # discard this stale prediction instead of
-            # poisoning the real-time queue.
-
-            self.pending_messages.popleft()
 
             self.get_logger().warning(
                 'Drop prediction: exact TF unavailable '
@@ -973,16 +989,25 @@ class FourDofFeasibilityNode(Node):
                 f'stamp={stamp.nanoseconds * 1e-9:.3f}'
             )
 
+            self.pending_message = None
+
+            self.promote_latest()
+
             return
 
-        # Exact timestamp TF is now available.
+        # Exact timestamp TF is available.
+        #
+        # Clear the protected slot BEFORE processing so
+        # incoming callbacks cannot create a stale queue.
 
-        self.pending_messages.popleft()
+        self.pending_message = None
 
         self.process_prediction(
             msg,
             transform
         )
+
+        self.promote_latest()
 
     def process_prediction(
         self,
