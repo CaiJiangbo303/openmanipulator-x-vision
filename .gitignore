@@ -14,3 +14,5 @@ __pycache__/
 .venv-sam2/
 third_party/sam2/
 vision_ws/*.pt
+.stack_pids
+logs/
