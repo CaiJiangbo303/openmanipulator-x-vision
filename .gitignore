@@ -11,3 +11,6 @@ __pycache__/
 
 *.bag
 *.db3
+.venv-sam2/
+third_party/sam2/
+vision_ws/*.pt

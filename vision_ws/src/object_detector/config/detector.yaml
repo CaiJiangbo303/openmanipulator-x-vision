@@ -1,0 +1,13 @@
+object_detector:
+  ros__parameters:
+    backend: "yolo"
+    image_topic: /camera/image
+
+    model: yolo11s.pt
+
+    confidence: 0.25
+    iou: 0.45
+    imgsz: 640
+
+    device: "0"
+    quantize: "16"
