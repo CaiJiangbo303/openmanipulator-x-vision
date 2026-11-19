@@ -54,6 +54,10 @@ class ObjectLocalizerNode(Node):
             'world'
         )
         self.declare_parameter(
+            'use_depth_frame_id',
+            False
+        )
+        self.declare_parameter(
             'roi_scale',
             0.60
         )
@@ -93,6 +97,12 @@ class ObjectLocalizerNode(Node):
         self.world_frame = self.get_parameter(
             'world_frame'
         ).value
+
+        self.use_depth_frame_id = bool(
+            self.get_parameter(
+                'use_depth_frame_id'
+            ).value
+        )
 
         self.roi_scale = float(
             self.get_parameter('roi_scale').value
@@ -191,8 +201,17 @@ class ObjectLocalizerNode(Node):
         )
 
         self.get_logger().info(
-            f'TF: {self.optical_frame} '
+            f'TF fallback: {self.optical_frame} '
             f'-> {self.world_frame}'
+        )
+
+        self.get_logger().info(
+            'Depth frame source: '
+            + (
+                'message header'
+                if self.use_depth_frame_id
+                else 'configured optical_frame'
+            )
         )
 
     def camera_info_callback(self, msg):
@@ -215,26 +234,77 @@ class ObjectLocalizerNode(Node):
 
     def depth_to_numpy(self, msg):
 
-        if msg.encoding != '32FC1':
-            self.get_logger().warning(
-                'Unsupported depth encoding: '
-                f'{msg.encoding}'
+        # Gazebo / some RGB-D pipelines:
+        #   32FC1, metres.
+        #
+        # RealSense raw/aligned depth:
+        #   16UC1, millimetres.
+        #
+        # Internally the fast localizer always works
+        # with float32 metres.
+
+        if msg.encoding == '32FC1':
+
+            dtype = (
+                '>f4'
+                if msg.is_bigendian
+                else '<f4'
             )
-            return None
 
-        row_width = msg.step // 4
+            row_width = msg.step // 4
 
-        depth = np.frombuffer(
-            msg.data,
-            dtype=np.float32
+            depth = np.frombuffer(
+                msg.data,
+                dtype=dtype
+            ).reshape(
+                msg.height,
+                row_width
+            )
+
+            return depth[
+                :,
+                :msg.width
+            ].astype(
+                np.float32,
+                copy=False
+            )
+
+        if msg.encoding == '16UC1':
+
+            dtype = (
+                '>u2'
+                if msg.is_bigendian
+                else '<u2'
+            )
+
+            row_width = msg.step // 2
+
+            depth_mm = np.frombuffer(
+                msg.data,
+                dtype=dtype
+            ).reshape(
+                msg.height,
+                row_width
+            )
+
+            depth_mm = depth_mm[
+                :,
+                :msg.width
+            ]
+
+            return (
+                depth_mm.astype(
+                    np.float32
+                )
+                * 0.001
+            )
+
+        self.get_logger().warning(
+            'Unsupported depth encoding: '
+            f'{msg.encoding}'
         )
 
-        depth = depth.reshape(
-            msg.height,
-            row_width
-        )
-
-        return depth[:, :msg.width]
+        return None
 
     def estimate_depth(
         self,
@@ -417,7 +487,8 @@ class ObjectLocalizerNode(Node):
         u,
         v,
         z,
-        stamp
+        stamp,
+        frame_id
     ):
 
         x = (
@@ -435,9 +506,7 @@ class ObjectLocalizerNode(Node):
         point = PointStamped()
 
         point.header.stamp = stamp
-        point.header.frame_id = (
-            self.optical_frame
-        )
+        point.header.frame_id = frame_id
 
         point.point.x = float(x)
         point.point.y = float(y)
@@ -457,7 +526,7 @@ class ObjectLocalizerNode(Node):
         transform = (
             self.tf_buffer.lookup_transform(
                 self.world_frame,
-                self.optical_frame,
+                optical_point.header.frame_id,
                 stamp,
                 timeout=Duration(
                     seconds=0.05
@@ -517,7 +586,7 @@ class ObjectLocalizerNode(Node):
         output = Detection3DArray()
 
         output.header.stamp = (
-            detections_msg.header.stamp
+            depth_msg.header.stamp
         )
 
         output.header.frame_id = (
@@ -551,12 +620,24 @@ class ObjectLocalizerNode(Node):
                 valid_pixels
             ) = depth_result
 
+            source_frame = (
+                depth_msg.header.frame_id
+                if (
+                    self.use_depth_frame_id
+                    and
+                    depth_msg.header.frame_id
+                )
+                else
+                self.optical_frame
+            )
+
             optical_point = (
                 self.project_to_optical(
                     u,
                     v,
                     z,
-                    detections_msg.header.stamp
+                    depth_msg.header.stamp,
+                    source_frame
                 )
             )
 
