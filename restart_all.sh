@@ -107,7 +107,26 @@ exec ros2 run object_segmenter object_segmenter \
 
 sleep 1
 
-start_node "05_localizer" "
+start_node "05_fast_localizer" "
+cd '$WS'
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+exec ros2 run object_localizer object_localizer \
+  --ros-args \
+  -p use_sim_time:=true \
+  -p detections_topic:=/object_tracker/detections \
+  -p depth_topic:=/camera/depth_image \
+  -p camera_info_topic:=/camera/camera_info \
+  -p output_topic:=/object_localizer/detections_3d_fast \
+  -p world_frame:=world \
+  -p optical_frame:=realsense_camera_optical_frame \
+  -p use_depth_frame_id:=false \
+  -p max_depth_time_diff_ms:=0.0
+"
+
+sleep 1
+
+start_node "06_mask_localizer" "
 cd '$WS'
 source /opt/ros/humble/setup.bash
 source install/setup.bash
@@ -118,7 +137,7 @@ exec ros2 run object_localizer mask_localizer \
 
 sleep 1
 
-start_node "06_self_filter" "
+start_node "07_self_filter" "
 cd '$WS'
 source /opt/ros/humble/setup.bash
 source install/setup.bash
@@ -129,19 +148,20 @@ exec ros2 run object_self_filter object_self_filter \
 
 sleep 1
 
-start_node "07_state_manager" "
+start_node "08_state_manager" "
 cd '$WS'
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 exec ros2 run object_state_manager object_state_manager \
   --ros-args \
   -p use_sim_time:=true \
-  -p measurement_topic:=/object_self_filter/detections_3d
+  -p fast_measurement_topic:=/object_localizer/detections_3d_fast \
+  -p precise_measurement_topic:=/object_self_filter/detections_3d
 "
 
 sleep 1
 
-start_node "08_predictor" "
+start_node "09_predictor" "
 cd '$WS'
 source /opt/ros/humble/setup.bash
 source install/setup.bash
@@ -152,7 +172,7 @@ exec ros2 run object_motion_predictor object_motion_predictor \
 
 sleep 1
 
-start_node "09_feasibility" "
+start_node "10_feasibility" "
 cd '$WS'
 source /opt/ros/humble/setup.bash
 source install/setup.bash
@@ -163,7 +183,7 @@ exec ros2 run four_dof_feasibility four_dof_feasibility \
 
 sleep 1
 
-start_node "10_selector" "
+start_node "11_selector" "
 cd '$WS'
 source /opt/ros/humble/setup.bash
 source install/setup.bash
@@ -174,7 +194,7 @@ exec ros2 run target_selector target_selector \
 
 sleep 1
 
-start_node "11_grasp_bridge" "
+start_node "12_grasp_bridge" "
 cd '$WS'
 source /opt/ros/humble/setup.bash
 source install/setup.bash

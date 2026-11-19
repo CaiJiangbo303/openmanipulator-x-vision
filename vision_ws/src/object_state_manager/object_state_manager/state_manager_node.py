@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -35,7 +36,20 @@ class TrackState:
     age: int = 1
     missed: int = 0
 
-    measurement_source: str = 'mask_rgbd'
+    measurement_source: str = 'unknown'
+    measurement_source_type: int = 0
+
+    # Slowly varying correction from precise mask depth
+    # relative to Fast3D bbox depth.
+    precise_bias: np.ndarray = field(
+        default_factory=lambda: np.zeros(
+            3,
+            dtype=np.float64
+        )
+    )
+
+    precise_bias_valid: bool = False
+    last_precise_stamp_ns: int = -1
 
 
 class ObjectStateManager(Node):
@@ -51,8 +65,38 @@ class ObjectStateManager(Node):
         # -------------------------------------------------
 
         self.declare_parameter(
-            'measurement_topic',
-            '/object_localizer/detections_3d_mask'
+            'fast_measurement_topic',
+            '/object_localizer/detections_3d_fast'
+        )
+
+        self.declare_parameter(
+            'precise_measurement_topic',
+            '/object_self_filter/detections_3d'
+        )
+
+        self.declare_parameter(
+            'fast_history_size',
+            32
+        )
+
+        self.declare_parameter(
+            'precise_match_tolerance_ms',
+            20.0
+        )
+
+        self.declare_parameter(
+            'precise_bias_alpha',
+            0.50
+        )
+
+        self.declare_parameter(
+            'precise_bias_timeout',
+            1.50
+        )
+
+        self.declare_parameter(
+            'stale_timeout',
+            0.50
         )
 
         self.declare_parameter(
@@ -115,10 +159,67 @@ class ObjectStateManager(Node):
             1.00
         )
 
-        self.measurement_topic = (
+        self.fast_measurement_topic = (
             self.get_parameter(
-                'measurement_topic'
+                'fast_measurement_topic'
             ).value
+        )
+
+        self.precise_measurement_topic = (
+            self.get_parameter(
+                'precise_measurement_topic'
+            ).value
+        )
+
+        self.fast_history_size = max(
+            4,
+            int(
+                self.get_parameter(
+                    'fast_history_size'
+                ).value
+            )
+        )
+
+        self.precise_match_tolerance_ns = int(
+            max(
+                0.0,
+                float(
+                    self.get_parameter(
+                        'precise_match_tolerance_ms'
+                    ).value
+                )
+            )
+            * 1_000_000.0
+        )
+
+        self.precise_bias_alpha = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    self.get_parameter(
+                        'precise_bias_alpha'
+                    ).value
+                )
+            )
+        )
+
+        self.precise_bias_timeout = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    'precise_bias_timeout'
+                ).value
+            )
+        )
+
+        self.stale_timeout = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    'stale_timeout'
+                ).value
+            )
         )
 
         self.output_topic = (
@@ -199,15 +300,29 @@ class ObjectStateManager(Node):
 
         self.tracks = {}
 
+        # Raw Fast3D measurements keyed by tracker ID.
+        # These are used only to time-align delayed precise
+        # measurements. They are bounded per track.
+        self.fast_history = {}
+
         # -------------------------------------------------
         # ROS interfaces
         # -------------------------------------------------
 
-        self.measurement_sub = (
+        self.fast_measurement_sub = (
             self.create_subscription(
                 Detection3DArray,
-                self.measurement_topic,
-                self.measurement_callback,
+                self.fast_measurement_topic,
+                self.fast_measurement_callback,
+                10
+            )
+        )
+
+        self.precise_measurement_sub = (
+            self.create_subscription(
+                Detection3DArray,
+                self.precise_measurement_topic,
+                self.precise_measurement_callback,
                 10
             )
         )
@@ -238,8 +353,13 @@ class ObjectStateManager(Node):
         )
 
         self.get_logger().info(
-            f'Measurement: '
-            f'{self.measurement_topic}'
+            f'Fast measurement: '
+            f'{self.fast_measurement_topic}'
+        )
+
+        self.get_logger().info(
+            f'Precise measurement: '
+            f'{self.precise_measurement_topic}'
         )
 
         self.get_logger().info(
@@ -253,10 +373,317 @@ class ObjectStateManager(Node):
         )
 
     # -----------------------------------------------------
-    # Measurement update
+    # Measurement parsing / fusion
     # -----------------------------------------------------
 
-    def measurement_callback(
+    def parse_detection(
+        self,
+        detection
+    ):
+
+        if not detection.id:
+            return None
+
+        if not detection.results:
+            return None
+
+        result = detection.results[0]
+
+        p = result.pose.pose.position
+
+        measurement = np.array(
+            [
+                p.x,
+                p.y,
+                p.z,
+            ],
+            dtype=np.float64
+        )
+
+        if not np.all(
+            np.isfinite(
+                measurement
+            )
+        ):
+            return None
+
+        return (
+            detection.id,
+            result.hypothesis.class_id,
+            float(
+                result.hypothesis.score
+            ),
+            measurement,
+        )
+
+    # -----------------------------------------------------
+
+    def create_track(
+        self,
+        track_id,
+        class_id,
+        measurement,
+        confidence,
+        stamp,
+        source_name,
+        source_type
+    ):
+
+        variance = np.full(
+            3,
+            self.initial_std ** 2,
+            dtype=np.float64
+        )
+
+        state = TrackState(
+            track_id=track_id,
+            class_id=class_id,
+            position=measurement.copy(),
+            velocity=np.zeros(
+                3,
+                dtype=np.float64
+            ),
+            variance=variance,
+            confidence=confidence,
+            last_stamp=stamp,
+            measurement_source=source_name,
+            measurement_source_type=source_type,
+        )
+
+        self.tracks[
+            track_id
+        ] = state
+
+        self.get_logger().info(
+            f'NEW {track_id} '
+            f'{class_id} '
+            f'source={source_name} '
+            f'position=('
+            f'{measurement[0]:+.4f},'
+            f'{measurement[1]:+.4f},'
+            f'{measurement[2]:+.4f})'
+        )
+
+        return state
+
+    # -----------------------------------------------------
+
+    def update_track(
+        self,
+        state,
+        class_id,
+        measurement,
+        confidence,
+        stamp,
+        source_name,
+        source_type
+    ):
+
+        dt = (
+            stamp.nanoseconds
+            -
+            state.last_stamp.nanoseconds
+        ) * 1e-9
+
+        # Freshness > completeness.
+        # Never rewind the filter with an old direct
+        # measurement.
+        if dt < -1e-6:
+            return False
+
+        if dt <= 1e-4:
+
+            residual = (
+                measurement
+                -
+                state.position
+            )
+
+            state.position = (
+                state.position
+                +
+                self.alpha
+                *
+                residual
+            )
+
+        else:
+
+            predicted = (
+                state.position
+                +
+                state.velocity
+                *
+                dt
+            )
+
+            residual = (
+                measurement
+                -
+                predicted
+            )
+
+            state.position = (
+                predicted
+                +
+                self.alpha
+                *
+                residual
+            )
+
+            state.velocity = (
+                state.velocity
+                +
+                (
+                    self.beta
+                    /
+                    dt
+                )
+                *
+                residual
+            )
+
+        residual_sq = (
+            residual ** 2
+        )
+
+        state.variance = (
+            (
+                1.0
+                -
+                self.uncertainty_alpha
+            )
+            *
+            state.variance
+            +
+            self.uncertainty_alpha
+            *
+            residual_sq
+        )
+
+        state.variance = np.maximum(
+            state.variance,
+            self.minimum_std ** 2
+        )
+
+        state.class_id = class_id
+
+        state.confidence = (
+            0.8
+            *
+            state.confidence
+            +
+            0.2
+            *
+            confidence
+        )
+
+        state.last_stamp = stamp
+        state.age += 1
+        state.missed = 0
+
+        state.measurement_source = (
+            source_name
+        )
+
+        state.measurement_source_type = int(
+            source_type
+        )
+
+        return True
+
+    # -----------------------------------------------------
+
+    def remember_fast_measurement(
+        self,
+        track_id,
+        stamp,
+        measurement
+    ):
+
+        history = self.fast_history.get(
+            track_id
+        )
+
+        if history is None:
+
+            history = deque(
+                maxlen=self.fast_history_size
+            )
+
+            self.fast_history[
+                track_id
+            ] = history
+
+        history.append(
+            (
+                stamp.nanoseconds,
+                measurement.copy(),
+            )
+        )
+
+    # -----------------------------------------------------
+
+    def find_matching_fast(
+        self,
+        track_id,
+        precise_stamp
+    ):
+
+        history = self.fast_history.get(
+            track_id
+        )
+
+        if not history:
+            return None
+
+        target_ns = (
+            precise_stamp.nanoseconds
+        )
+
+        best = None
+        best_error = None
+
+        for stamp_ns, measurement in history:
+
+            error = abs(
+                stamp_ns
+                -
+                target_ns
+            )
+
+            if (
+                best_error is None
+                or
+                error < best_error
+            ):
+
+                best_error = error
+
+                best = (
+                    stamp_ns,
+                    measurement
+                )
+
+                if error == 0:
+                    break
+
+        if (
+            best is None
+            or
+            best_error
+            >
+            self.precise_match_tolerance_ns
+        ):
+            return None
+
+        return best
+
+    # -----------------------------------------------------
+    # Fast path
+    # -----------------------------------------------------
+
+    def fast_measurement_callback(
         self,
         msg
     ):
@@ -269,224 +696,325 @@ class ObjectStateManager(Node):
 
         for detection in msg.detections:
 
-            if not detection.id:
-                continue
-
-            if not detection.results:
-                continue
-
-            result = detection.results[0]
-
-            p = result.pose.pose.position
-
-            measurement = np.array(
-                [
-                    p.x,
-                    p.y,
-                    p.z,
-                ],
-                dtype=np.float64
+            parsed = self.parse_detection(
+                detection
             )
 
-            if not np.all(
-                np.isfinite(
-                    measurement
-                )
-            ):
+            if parsed is None:
                 continue
 
-            track_id = detection.id
-
-            class_id = (
-                result.hypothesis.class_id
-            )
-
-            confidence = float(
-                result.hypothesis.score
-            )
+            (
+                track_id,
+                class_id,
+                confidence,
+                raw_measurement,
+            ) = parsed
 
             observed_ids.add(
                 track_id
             )
 
-            # ---------------------------------------------
-            # New object
-            # ---------------------------------------------
+            self.remember_fast_measurement(
+                track_id,
+                stamp,
+                raw_measurement
+            )
 
-            if track_id not in self.tracks:
+            state = self.tracks.get(
+                track_id
+            )
 
-                variance = np.full(
-                    3,
-                    self.initial_std ** 2,
-                    dtype=np.float64
-                )
+            if state is None:
 
-                self.tracks[
-                    track_id
-                ] = TrackState(
-                    track_id=track_id,
-                    class_id=class_id,
-                    position=measurement.copy(),
-                    velocity=np.zeros(
-                        3,
-                        dtype=np.float64
-                    ),
-                    variance=variance,
-                    confidence=confidence,
-                    last_stamp=stamp,
-                )
-
-                self.get_logger().info(
-                    f'NEW {track_id} '
-                    f'{class_id} '
-                    f'position=('
-                    f'{measurement[0]:+.4f},'
-                    f'{measurement[1]:+.4f},'
-                    f'{measurement[2]:+.4f})'
+                self.create_track(
+                    track_id,
+                    class_id,
+                    raw_measurement,
+                    confidence,
+                    stamp,
+                    'fast_bbox_depth',
+                    ObjectState.SOURCE_FAST_BBOX_DEPTH
                 )
 
                 continue
 
-            # ---------------------------------------------
-            # Existing object
-            # ---------------------------------------------
-
-            state = self.tracks[
-                track_id
-            ]
-
-            dt = (
+            # If a precise observation was already accepted
+            # for exactly this source timestamp, do not let
+            # the lower-precision Fast3D observation replace
+            # it merely because callback order was reversed.
+            dt_ns = (
                 stamp.nanoseconds
                 -
                 state.last_stamp.nanoseconds
-            ) * 1e-9
+            )
 
-            # Ignore old measurements.
-            if dt < -1e-6:
+            if (
+                abs(dt_ns) <= 100_000
+                and
+                state.measurement_source_type
+                ==
+                ObjectState.SOURCE_PRECISE_MASK_DEPTH
+            ):
+
+                state.missed = 0
                 continue
 
-            # Same timestamp:
-            # accept position correction but do not
-            # estimate velocity.
-            if dt <= 1e-4:
+            bias_active = (
+                state.precise_bias_valid
+            )
 
-                residual = (
-                    measurement
+            if (
+                bias_active
+                and
+                state.last_precise_stamp_ns >= 0
+            ):
+
+                bias_age = (
+                    stamp.nanoseconds
                     -
-                    state.position
+                    state.last_precise_stamp_ns
+                ) * 1e-9
+
+                if (
+                    bias_age
+                    >
+                    self.precise_bias_timeout
+                ):
+
+                    state.precise_bias_valid = False
+                    bias_active = False
+
+            if bias_active:
+
+                measurement = (
+                    raw_measurement
+                    +
+                    state.precise_bias
                 )
 
-                state.position = (
-                    state.position
-                    +
-                    self.alpha
-                    *
-                    residual
+                source_name = (
+                    'fused_fast_precise'
+                )
+
+                source_type = (
+                    ObjectState.SOURCE_FUSED
                 )
 
             else:
 
-                # -----------------------------------------
-                # Alpha-beta constant velocity filter
-                # -----------------------------------------
-
-                predicted = (
-                    state.position
-                    +
-                    state.velocity
-                    *
-                    dt
+                measurement = (
+                    raw_measurement
                 )
 
-                residual = (
-                    measurement
-                    -
-                    predicted
+                source_name = (
+                    'fast_bbox_depth'
                 )
 
-                state.position = (
-                    predicted
-                    +
-                    self.alpha
-                    *
-                    residual
+                source_type = (
+                    ObjectState.SOURCE_FAST_BBOX_DEPTH
                 )
 
-                state.velocity = (
-                    state.velocity
-                    +
-                    (
-                        self.beta
-                        /
-                        dt
-                    )
-                    *
-                    residual
-                )
-
-            # ---------------------------------------------
-            # Heuristic uncertainty estimate.
-            #
-            # This is NOT yet a calibrated covariance.
-            # It measures recent position innovation.
-            # ---------------------------------------------
-
-            residual_sq = (
-                residual ** 2
+            self.update_track(
+                state,
+                class_id,
+                measurement,
+                confidence,
+                stamp,
+                source_name,
+                source_type
             )
 
-            state.variance = (
-                (
-                    1.0
-                    -
-                    self.uncertainty_alpha
-                )
-                *
-                state.variance
-                +
-                self.uncertainty_alpha
-                *
-                residual_sq
-            )
-
-            min_variance = (
-                self.minimum_std ** 2
-            )
-
-            state.variance = np.maximum(
-                state.variance,
-                min_variance
-            )
-
-            state.class_id = (
-                class_id
-            )
-
-            state.confidence = (
-                0.8
-                *
-                state.confidence
-                +
-                0.2
-                *
-                confidence
-            )
-
-            state.last_stamp = stamp
-
-            state.age += 1
-            state.missed = 0
-
-        # ---------------------------------------------
-        # Tracks that were absent from this measurement
-        # ---------------------------------------------
-
+        # Missing-count bookkeeping follows the high-rate
+        # primary path only. Slow precise callbacks must not
+        # artificially inflate missed counts.
         for track_id, state in (
             self.tracks.items()
         ):
 
             if track_id not in observed_ids:
                 state.missed += 1
+
+    # -----------------------------------------------------
+    # Precise path
+    # -----------------------------------------------------
+
+    def precise_measurement_callback(
+        self,
+        msg
+    ):
+
+        stamp = Time.from_msg(
+            msg.header.stamp
+        )
+
+        for detection in msg.detections:
+
+            parsed = self.parse_detection(
+                detection
+            )
+
+            if parsed is None:
+                continue
+
+            (
+                track_id,
+                class_id,
+                confidence,
+                precise_measurement,
+            ) = parsed
+
+            state = self.tracks.get(
+                track_id
+            )
+
+            # Precise-only degradation mode.
+            if state is None:
+
+                state = self.create_track(
+                    track_id,
+                    class_id,
+                    precise_measurement,
+                    confidence,
+                    stamp,
+                    'precise_mask_depth',
+                    ObjectState.SOURCE_PRECISE_MASK_DEPTH
+                )
+
+                state.last_precise_stamp_ns = (
+                    stamp.nanoseconds
+                )
+
+                continue
+
+            matched = self.find_matching_fast(
+                track_id,
+                stamp
+            )
+
+            if matched is not None:
+
+                (
+                    _,
+                    fast_measurement
+                ) = matched
+
+                # If the precise frame is extremely delayed
+                # relative to the current state, discard it.
+                # A numerically correct old correction can
+                # still be unsafe on a moving platform.
+                lag = (
+                    state.last_stamp.nanoseconds
+                    -
+                    stamp.nanoseconds
+                ) * 1e-9
+
+                if (
+                    lag
+                    >
+                    self.precise_bias_timeout
+                ):
+                    continue
+
+                correction = (
+                    precise_measurement
+                    -
+                    fast_measurement
+                )
+
+                old_bias = (
+                    state.precise_bias.copy()
+                )
+
+                if state.precise_bias_valid:
+
+                    new_bias = (
+                        (
+                            1.0
+                            -
+                            self.precise_bias_alpha
+                        )
+                        *
+                        old_bias
+                        +
+                        self.precise_bias_alpha
+                        *
+                        correction
+                    )
+
+                else:
+
+                    new_bias = (
+                        correction.copy()
+                    )
+
+                state.precise_bias = (
+                    new_bias
+                )
+
+                state.precise_bias_valid = True
+
+                state.last_precise_stamp_ns = (
+                    stamp.nanoseconds
+                )
+
+                # Apply only the change in calibration to
+                # the current filter state. Do not rewind
+                # state.last_stamp to the delayed precise
+                # frame.
+                state.position = (
+                    state.position
+                    +
+                    (
+                        new_bias
+                        -
+                        old_bias
+                    )
+                )
+
+                state.class_id = class_id
+
+                state.confidence = (
+                    0.8
+                    *
+                    state.confidence
+                    +
+                    0.2
+                    *
+                    confidence
+                )
+
+                state.age += 1
+                state.missed = 0
+
+                state.measurement_source = (
+                    'fused_fast_precise'
+                )
+
+                state.measurement_source_type = (
+                    ObjectState.SOURCE_FUSED
+                )
+
+                continue
+
+            # No corresponding Fast frame exists. A precise
+            # measurement may still update the state if it
+            # is newer. Old unmatched precise frames are
+            # intentionally rejected.
+            accepted = self.update_track(
+                state,
+                class_id,
+                precise_measurement,
+                confidence,
+                stamp,
+                'precise_mask_depth',
+                ObjectState.SOURCE_PRECISE_MASK_DEPTH
+            )
+
+            if accepted:
+
+                state.last_precise_stamp_ns = (
+                    stamp.nanoseconds
+                )
 
     # -----------------------------------------------------
     # State publication / prediction
@@ -643,6 +1171,40 @@ class ObjectStateManager(Node):
                 state.last_stamp.to_msg()
             )
 
+            msg.source_stamp = (
+                state.last_stamp.to_msg()
+            )
+
+            msg.measurement_age_ms = float(
+                since_seen
+                *
+                1000.0
+            )
+
+            msg.measurement_source_type = int(
+                state.measurement_source_type
+            )
+
+            msg.position_predicted = bool(
+                prediction_time
+                >
+                1e-6
+            )
+
+            msg.valid_3d = bool(
+                np.all(
+                    np.isfinite(
+                        predicted_position
+                    )
+                )
+            )
+
+            msg.stale = bool(
+                since_seen
+                >
+                self.stale_timeout
+            )
+
             msg.age = int(
                 state.age
             )
@@ -672,6 +1234,11 @@ class ObjectStateManager(Node):
             del self.tracks[
                 track_id
             ]
+
+            self.fast_history.pop(
+                track_id,
+                None
+            )
 
         self.state_pub.publish(
             output
