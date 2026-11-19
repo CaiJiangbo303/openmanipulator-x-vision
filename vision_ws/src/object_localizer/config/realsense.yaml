@@ -1,3 +1,32 @@
+object_localizer:
+  ros__parameters:
+
+    # Fast path: tracker bbox + aligned RealSense depth.
+    # This path must remain available even when SAM2 is
+    # delayed or temporarily unavailable.
+    detections_topic: /object_tracker/detections
+
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+
+    # Aligned depth uses COLOR pixel geometry.
+    camera_info_topic: /camera/camera/color/camera_info
+
+    output_topic: /object_localizer/detections_3d_fast
+
+    # Trust the actual frame carried by aligned depth.
+    use_depth_frame_id: true
+
+    world_frame: world
+
+    # Use only the inner bbox region to reduce background
+    # contamination near object boundaries.
+    roi_scale: 0.60
+
+    min_depth: 0.05
+    max_depth: 3.0
+    min_valid_pixels: 20
+
+
 mask_localizer:
   ros__parameters:
 
