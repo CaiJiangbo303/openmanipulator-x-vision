@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+from collections import deque
+from time import monotonic_ns
+
 import numpy as np
 
 import rclpy
@@ -8,7 +11,6 @@ from rclpy.duration import Duration
 from rclpy.time import Time
 from rclpy.qos import qos_profile_sensor_data
 
-import message_filters
 
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PointStamped
@@ -73,6 +75,34 @@ class ObjectLocalizerNode(Node):
             'min_valid_pixels',
             20
         )
+        self.declare_parameter(
+            'depth_cache_size',
+            16
+        )
+        self.declare_parameter(
+            'detection_cache_size',
+            16
+        )
+        self.declare_parameter(
+            'detection_cache_ttl_sec',
+            0.50
+        )
+        self.declare_parameter(
+            'max_depth_time_diff_ms',
+            0.0
+        )
+        self.declare_parameter(
+            'tf_pending_queue_size',
+            16
+        )
+        self.declare_parameter(
+            'tf_pending_ttl_sec',
+            0.50
+        )
+        self.declare_parameter(
+            'tf_poll_period_sec',
+            0.02
+        )
 
         self.detections_topic = self.get_parameter(
             'detections_topic'
@@ -122,6 +152,66 @@ class ObjectLocalizerNode(Node):
             ).value
         )
 
+        self.depth_cache_size = max(
+            2,
+            int(
+                self.get_parameter(
+                    'depth_cache_size'
+                ).value
+            )
+        )
+
+        self.detection_cache_size = max(
+            2,
+            int(
+                self.get_parameter(
+                    'detection_cache_size'
+                ).value
+            )
+        )
+
+        self.detection_cache_ttl_sec = max(
+            0.05,
+            float(
+                self.get_parameter(
+                    'detection_cache_ttl_sec'
+                ).value
+            )
+        )
+
+        self.max_depth_time_diff_ms = float(
+            self.get_parameter(
+                'max_depth_time_diff_ms'
+            ).value
+        )
+
+        self.tf_pending_queue_size = max(
+            2,
+            int(
+                self.get_parameter(
+                    'tf_pending_queue_size'
+                ).value
+            )
+        )
+
+        self.tf_pending_ttl_sec = max(
+            0.05,
+            float(
+                self.get_parameter(
+                    'tf_pending_ttl_sec'
+                ).value
+            )
+        )
+
+        self.tf_poll_period_sec = max(
+            0.005,
+            float(
+                self.get_parameter(
+                    'tf_poll_period_sec'
+                ).value
+            )
+        )
+
         # Camera intrinsics
         self.fx = None
         self.fy = None
@@ -143,36 +233,31 @@ class ObjectLocalizerNode(Node):
             self
         )
 
-        # Detection2D keeps the original RGB timestamp.
-        # Depth comes from the same RGB-D sensor.
-        self.detection_sub = message_filters.Subscriber(
-            self,
+        # Source-stamp cache:
+        # depth arrival timing no longer has to coincide with detections.
+        self.depth_cache = deque(
+            maxlen=self.depth_cache_size
+        )
+
+        # Keep only a small bounded set of unmatched detections.
+        # This prevents arrival-order jitter from destroying exact
+        # source-stamp matches while still bounding latency/memory.
+        self.pending_detections = deque(
+            maxlen=self.detection_cache_size
+        )
+
+        self.detection_sub = self.create_subscription(
             Detection2DArray,
             self.detections_topic,
-            qos_profile=10
+            self.detection_callback,
+            10
         )
 
-        self.depth_sub = message_filters.Subscriber(
-            self,
+        self.depth_sub = self.create_subscription(
             Image,
             self.depth_topic,
-            qos_profile=qos_profile_sensor_data
-        )
-
-        self.sync = (
-            message_filters.ApproximateTimeSynchronizer(
-                [
-                    self.detection_sub,
-                    self.depth_sub
-                ],
-                queue_size=20,
-                slop=0.005,
-                allow_headerless=False
-            )
-        )
-
-        self.sync.registerCallback(
-            self.synced_callback
+            self.depth_callback,
+            qos_profile_sensor_data
         )
 
         self.output_pub = self.create_publisher(
@@ -182,6 +267,20 @@ class ObjectLocalizerNode(Node):
         )
 
         self.frame_count = 0
+
+        # Matched RGB-D frames waiting for their exact-stamp TF.
+        #
+        # The queue is bounded. When TF catches up we process the
+        # newest frame that is already transformable and discard
+        # older ready frames. This keeps freshness above completeness.
+        self.pending_tf_pairs = deque(
+            maxlen=self.tf_pending_queue_size
+        )
+
+        self.tf_gate_timer = self.create_timer(
+            self.tf_poll_period_sec,
+            self.retry_tf_pending
+        )
 
         self.get_logger().info(
             'Object localizer started'
@@ -514,31 +613,6 @@ class ObjectLocalizerNode(Node):
 
         return point
 
-    def transform_to_world(
-        self,
-        optical_point
-    ):
-
-        stamp = Time.from_msg(
-            optical_point.header.stamp
-        )
-
-        transform = (
-            self.tf_buffer.lookup_transform(
-                self.world_frame,
-                optical_point.header.frame_id,
-                stamp,
-                timeout=Duration(
-                    seconds=0.05
-                )
-            )
-        )
-
-        return do_transform_point(
-            optical_point,
-            transform
-        )
-
     @staticmethod
     def timestamp_ns(stamp):
 
@@ -549,7 +623,366 @@ class ObjectLocalizerNode(Node):
             int(stamp.nanosec)
         )
 
-    def synced_callback(
+    def find_matching_depth(
+        self,
+        detections_msg
+    ):
+
+        if not self.depth_cache:
+            return None
+
+        detection_time = self.timestamp_ns(
+            detections_msg.header.stamp
+        )
+
+        best_depth = None
+        best_diff_ns = None
+
+        # Exact source stamp wins immediately.
+        # Otherwise keep the nearest cached depth frame.
+        for depth_msg in reversed(
+            self.depth_cache
+        ):
+
+            depth_time = self.timestamp_ns(
+                depth_msg.header.stamp
+            )
+
+            diff_ns = abs(
+                detection_time - depth_time
+            )
+
+            if diff_ns == 0:
+                return depth_msg
+
+            if (
+                best_diff_ns is None
+                or
+                diff_ns < best_diff_ns
+            ):
+                best_diff_ns = diff_ns
+                best_depth = depth_msg
+
+        if best_depth is None:
+            return None
+
+        diff_ms = best_diff_ns / 1e6
+
+        # Safety gate: never force-pair measurements
+        # whose source timestamps are too far apart.
+        if (
+            diff_ms
+            > self.max_depth_time_diff_ms
+        ):
+            return None
+
+        return best_depth
+
+    def detection_callback(
+        self,
+        detections_msg
+    ):
+
+        self.prune_pending_detections()
+
+        depth_msg = self.find_matching_depth(
+            detections_msg
+        )
+
+        if depth_msg is not None:
+
+            self.process_pair(
+                detections_msg,
+                depth_msg
+            )
+
+            return
+
+        self.pending_detections.append(
+            (
+                monotonic_ns(),
+                detections_msg
+            )
+        )
+
+    def find_matching_detection(
+        self,
+        depth_msg
+    ):
+
+        if not self.pending_detections:
+            return None
+
+        depth_time = self.timestamp_ns(
+            depth_msg.header.stamp
+        )
+
+        best_index = None
+        best_diff_ns = None
+
+        # Newest-first so ties prefer fresher detections.
+        for index in range(
+            len(self.pending_detections) - 1,
+            -1,
+            -1
+        ):
+
+            _, detections_msg = (
+                self.pending_detections[index]
+            )
+
+            detection_time = self.timestamp_ns(
+                detections_msg.header.stamp
+            )
+
+            diff_ns = abs(
+                detection_time - depth_time
+            )
+
+            if diff_ns == 0:
+                return index
+
+            if (
+                best_diff_ns is None
+                or
+                diff_ns < best_diff_ns
+            ):
+                best_diff_ns = diff_ns
+                best_index = index
+
+        if best_index is None:
+            return None
+
+        if (
+            best_diff_ns / 1e6
+            >
+            self.max_depth_time_diff_ms
+        ):
+            return None
+
+        return best_index
+
+    def prune_pending_detections(
+        self
+    ):
+
+        # IMPORTANT:
+        # prune by local receipt age, never by source timestamp.
+        # GZ / DDS callback arrival order is not guaranteed to
+        # be monotonic in source time.
+        if not self.pending_detections:
+            return
+
+        now_ns = monotonic_ns()
+
+        ttl_ns = int(
+            self.detection_cache_ttl_sec
+            * 1_000_000_000
+        )
+
+        while self.pending_detections:
+
+            receipt_ns, _ = (
+                self.pending_detections[0]
+            )
+
+            if (
+                now_ns - receipt_ns
+                <=
+                ttl_ns
+            ):
+                break
+
+            self.pending_detections.popleft()
+
+    def depth_callback(
+        self,
+        depth_msg
+    ):
+
+        self.prune_pending_detections()
+
+        self.depth_cache.append(
+            depth_msg
+        )
+
+        match_index = (
+            self.find_matching_detection(
+                depth_msg
+            )
+        )
+
+        if match_index is not None:
+
+            _, detections_msg = (
+                self.pending_detections[
+                    match_index
+                ]
+            )
+
+            del self.pending_detections[
+                match_index
+            ]
+
+            self.process_pair(
+                detections_msg,
+                depth_msg
+            )
+
+    def depth_source_frame(
+        self,
+        depth_msg
+    ):
+
+        return (
+            depth_msg.header.frame_id
+            if (
+                self.use_depth_frame_id
+                and
+                depth_msg.header.frame_id
+            )
+            else
+            self.optical_frame
+        )
+
+    def lookup_exact_transform(
+        self,
+        depth_msg
+    ):
+
+        source_frame = self.depth_source_frame(
+            depth_msg
+        )
+
+        stamp = Time.from_msg(
+            depth_msg.header.stamp
+        )
+
+        try:
+            return self.tf_buffer.lookup_transform(
+                self.world_frame,
+                source_frame,
+                stamp,
+                timeout=Duration(
+                    seconds=0.0
+                )
+            )
+
+        except Exception:
+            # TF not ready yet.
+            # Do not block and do not spam warnings.
+            return None
+
+    def enqueue_tf_pair(
+        self,
+        detections_msg,
+        depth_msg
+    ):
+
+        stamp_ns = self.timestamp_ns(
+            depth_msg.header.stamp
+        )
+
+        # Avoid inserting the same matched frame repeatedly.
+        for _, _, pending_depth in self.pending_tf_pairs:
+
+            if (
+                self.timestamp_ns(
+                    pending_depth.header.stamp
+                )
+                ==
+                stamp_ns
+            ):
+                return
+
+        self.pending_tf_pairs.append(
+            (
+                monotonic_ns(),
+                detections_msg,
+                depth_msg
+            )
+        )
+
+    def retry_tf_pending(
+        self
+    ):
+
+        if (
+            self.fx is None
+            or
+            not self.pending_tf_pairs
+        ):
+            return
+
+        now_ns = monotonic_ns()
+
+        ttl_ns = int(
+            self.tf_pending_ttl_sec
+            * 1_000_000_000
+        )
+
+        while self.pending_tf_pairs:
+
+            receipt_ns, _, _ = (
+                self.pending_tf_pairs[0]
+            )
+
+            if now_ns - receipt_ns <= ttl_ns:
+                break
+
+            self.pending_tf_pairs.popleft()
+
+        if not self.pending_tf_pairs:
+            return
+
+        selected_index = None
+
+        # Newest-first:
+        # choose the freshest frame whose exact-stamp
+        # transform has become available.
+        for index in range(
+            len(self.pending_tf_pairs) - 1,
+            -1,
+            -1
+        ):
+
+            _, _, depth_msg = (
+                self.pending_tf_pairs[index]
+            )
+
+            transform = (
+                self.lookup_exact_transform(
+                    depth_msg
+                )
+            )
+
+            if transform is not None:
+                selected_index = index
+                break
+
+        if selected_index is None:
+            return
+
+        _, detections_msg, depth_msg = (
+            self.pending_tf_pairs[
+                selected_index
+            ]
+        )
+
+        # Everything older than the selected ready frame
+        # is stale. Drop it instead of replaying backlog.
+        for _ in range(
+            selected_index + 1
+        ):
+            self.pending_tf_pairs.popleft()
+
+        # process_pair() will perform one final exact lookup.
+        self.process_pair(
+            detections_msg,
+            depth_msg
+        )
+
+    def process_pair(
         self,
         detections_msg,
         depth_msg
@@ -563,6 +996,19 @@ class ObjectLocalizerNode(Node):
         )
 
         if depth is None:
+            return
+
+        transform = self.lookup_exact_transform(
+            depth_msg
+        )
+
+        if transform is None:
+
+            self.enqueue_tf_pair(
+                detections_msg,
+                depth_msg
+            )
+
             return
 
         self.frame_count += 1
@@ -621,14 +1067,9 @@ class ObjectLocalizerNode(Node):
             ) = depth_result
 
             source_frame = (
-                depth_msg.header.frame_id
-                if (
-                    self.use_depth_frame_id
-                    and
-                    depth_msg.header.frame_id
+                self.depth_source_frame(
+                    depth_msg
                 )
-                else
-                self.optical_frame
             )
 
             optical_point = (
@@ -641,19 +1082,12 @@ class ObjectLocalizerNode(Node):
                 )
             )
 
-            try:
-                world_point = (
-                    self.transform_to_world(
-                        optical_point
-                    )
+            world_point = (
+                do_transform_point(
+                    optical_point,
+                    transform
                 )
-
-            except Exception as exc:
-                self.get_logger().warning(
-                    'TF lookup failed: '
-                    f'{exc}'
-                )
-                continue
+            )
 
             source_result = (
                 detection2d.results[0]
@@ -667,8 +1101,7 @@ class ObjectLocalizerNode(Node):
                 output.header
             )
 
-            # Keep ID untouched.
-            # It is empty now; tracker will own it later.
+            # Preserve the tracker-owned persistent ID.
             detection3d.id = (
                 detection2d.id
             )
@@ -757,6 +1190,7 @@ class ObjectLocalizerNode(Node):
         self.output_pub.publish(
             output
         )
+
 
         if (
             self.frame_count % 20 == 0

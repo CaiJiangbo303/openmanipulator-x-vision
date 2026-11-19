@@ -26,6 +26,20 @@ object_localizer:
     max_depth: 3.0
     min_valid_pixels: 20
 
+    # Timestamp-keyed RGB-D matching
+    depth_cache_size: 16
+    detection_cache_size: 16
+    detection_cache_ttl_sec: 0.50
+
+    # Exact source-stamp matching for now.
+    # Guarded delayed fallback can be enabled later after real-camera validation.
+    max_depth_time_diff_ms: 0.0
+
+    # Non-blocking exact-stamp TF gate
+    tf_pending_queue_size: 16
+    tf_pending_ttl_sec: 0.50
+    tf_poll_period_sec: 0.02
+
 
 mask_localizer:
   ros__parameters:
