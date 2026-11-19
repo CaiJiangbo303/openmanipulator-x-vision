@@ -515,11 +515,12 @@ class ObjectSegmenterNode(Node):
             label_map
         )
 
-        self.publish_debug(
-            image_msg,
-            rgb,
-            label_map
-        )
+        if self.debug_pub.get_subscription_count() > 0:
+            self.publish_debug(
+                image_msg,
+                rgb,
+                label_map
+            )
 
         self.get_logger().info(
             f'frame={self.frame_count} | '
