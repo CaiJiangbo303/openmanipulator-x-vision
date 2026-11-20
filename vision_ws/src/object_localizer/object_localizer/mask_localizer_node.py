@@ -8,7 +8,13 @@ import message_filters
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.time import Time
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    HistoryPolicy,
+    DurabilityPolicy,
+    qos_profile_sensor_data,
+)
 
 from sensor_msgs.msg import (
     Image,
@@ -216,13 +222,27 @@ class MaskLocalizerNode(Node):
             )
         )
 
+        depth_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=20,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
         self.depth_sub = (
             message_filters.Subscriber(
                 self,
                 Image,
                 self.depth_topic,
-                qos_profile=qos_profile_sensor_data
+                qos_profile=depth_qos
             )
+        )
+
+        mask_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
         )
 
         self.mask_sub = (
@@ -230,7 +250,7 @@ class MaskLocalizerNode(Node):
                 self,
                 Image,
                 self.mask_topic,
-                qos_profile=qos_profile_sensor_data
+                qos_profile=mask_qos
             )
         )
 

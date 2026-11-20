@@ -175,6 +175,8 @@ exec ros2 launch \
   enable_depth:=true \
   enable_sync:=true \
   align_depth.enable:=true \
+  rgb_camera.color_profile:=640x480x6 \
+  depth_module.depth_profile:=640x480x6 \
   wait_for_device_timeout:=10.0
 "
 
@@ -238,10 +240,10 @@ source /opt/ros/humble/setup.bash
 source .venv-sam2/bin/activate
 source vision_ws/install/setup.bash
 
-exec ros2 run object_segmenter object_segmenter \
+exec python -m object_segmenter.segmenter_node \
   --ros-args \
   -p use_sim_time:=false \
-  -r /camera/image:=/camera/camera/color/image_raw
+  -p image_topic:=/camera/camera/color/image_raw
 "
 
         sleep 1

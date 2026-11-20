@@ -9,7 +9,13 @@ import rclpy
 import message_filters
 
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    HistoryPolicy,
+    DurabilityPolicy,
+    qos_profile_sensor_data,
+)
 
 from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray
@@ -173,10 +179,17 @@ class ObjectSegmenterNode(Node):
         # ...
         #
         # This gives us all instance masks in one ROS image.
+        mask_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
         self.mask_pub = self.create_publisher(
             Image,
             self.instance_mask_topic,
-            qos_profile_sensor_data
+            mask_qos
         )
 
         self.debug_pub = self.create_publisher(
