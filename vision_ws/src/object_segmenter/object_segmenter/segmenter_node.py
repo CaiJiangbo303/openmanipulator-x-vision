@@ -69,6 +69,13 @@ class ObjectSegmenterNode(Node):
             4
         )
 
+        # Detailed profiling is sampled sparsely because
+        # CUDA synchronization itself perturbs timing.
+        self.declare_parameter(
+            'profile_every_n_processed',
+            0
+        )
+
         self.image_topic = self.get_parameter(
             'image_topic'
         ).value
@@ -96,6 +103,12 @@ class ObjectSegmenterNode(Node):
         self.process_every_n_frames = int(
             self.get_parameter(
                 'process_every_n_frames'
+            ).value
+        )
+
+        self.profile_every_n_processed = int(
+            self.get_parameter(
+                'profile_every_n_processed'
             ).value
         )
 
@@ -173,6 +186,7 @@ class ObjectSegmenterNode(Node):
         )
 
         self.frame_count = 0
+        self.processed_count = 0
 
         self.get_logger().info(
             'Object segmenter started'
@@ -297,13 +311,17 @@ class ObjectSegmenterNode(Node):
             label_map.shape[1] * 2
         )
 
-        out.data = (
-            np.ascontiguousarray(
-                label_map.astype(
-                    np.uint16
-                )
-            ).tobytes()
-        )
+        if (
+            label_map.dtype != np.uint16
+            or
+            not label_map.flags.c_contiguous
+        ):
+            label_map = np.ascontiguousarray(
+                label_map,
+                dtype=np.uint16
+            )
+
+        out.data = label_map.tobytes()
 
         self.mask_pub.publish(
             out
@@ -392,6 +410,21 @@ class ObjectSegmenterNode(Node):
         if not detections_msg.detections:
             return
 
+        self.processed_count += 1
+
+        profile_this = (
+            self.profile_every_n_processed > 0
+            and
+            self.processed_count
+            %
+            self.profile_every_n_processed
+            == 0
+        )
+
+        if profile_this:
+            callback_start = time.perf_counter()
+            image_start = callback_start
+
         try:
 
             rgb = self.image_to_numpy(
@@ -406,7 +439,17 @@ class ObjectSegmenterNode(Node):
 
             return
 
+        if profile_this:
+            image_ms = (
+                time.perf_counter()
+                - image_start
+            ) * 1000.0
+
         start = time.perf_counter()
+
+        set_image_ms = 0.0
+        predict_ms = 0.0
+        merge_ms = 0.0
 
         # SAM2 encodes the image once.
         with torch.inference_mode(), torch.autocast(
@@ -414,9 +457,20 @@ class ObjectSegmenterNode(Node):
             dtype=torch.bfloat16
         ):
 
+            if profile_this:
+                torch.cuda.synchronize()
+                stage_start = time.perf_counter()
+
             self.predictor.set_image(
                 rgb
             )
+
+            if profile_this:
+                torch.cuda.synchronize()
+                set_image_ms = (
+                    time.perf_counter()
+                    - stage_start
+                ) * 1000.0
 
             label_map = np.zeros(
                 (
@@ -452,12 +506,25 @@ class ObjectSegmenterNode(Node):
                     detection
                 )
 
+                if profile_this:
+                    torch.cuda.synchronize()
+                    stage_start = time.perf_counter()
+
                 masks, scores, _ = (
                     self.predictor.predict(
                         box=box,
                         multimask_output=False
                     )
                 )
+
+                if profile_this:
+                    torch.cuda.synchronize()
+                    predict_ms += (
+                        time.perf_counter()
+                        - stage_start
+                    ) * 1000.0
+
+                    merge_start = time.perf_counter()
 
                 mask = (
                     masks[0]
@@ -503,6 +570,12 @@ class ObjectSegmenterNode(Node):
                     )
                 )
 
+                if profile_this:
+                    merge_ms += (
+                        time.perf_counter()
+                        - merge_start
+                    ) * 1000.0
+
         torch.cuda.synchronize()
 
         elapsed_ms = (
@@ -510,16 +583,43 @@ class ObjectSegmenterNode(Node):
             - start
         ) * 1000.0
 
+        if profile_this:
+            publish_start = time.perf_counter()
+
         self.publish_mask(
             image_msg,
             label_map
         )
+
+        if profile_this:
+            publish_mask_ms = (
+                time.perf_counter()
+                - publish_start
+            ) * 1000.0
 
         if self.debug_pub.get_subscription_count() > 0:
             self.publish_debug(
                 image_msg,
                 rgb,
                 label_map
+            )
+
+        if profile_this:
+            callback_ms = (
+                time.perf_counter()
+                - callback_start
+            ) * 1000.0
+
+            self.get_logger().info(
+                '[PROFILE] '
+                f'processed={self.processed_count} | '
+                f'image={image_ms:.1f} ms | '
+                f'set_image={set_image_ms:.1f} ms | '
+                f'predict={predict_ms:.1f} ms | '
+                f'merge={merge_ms:.1f} ms | '
+                f'publish_mask={publish_mask_ms:.1f} ms | '
+                f'sam2={elapsed_ms:.1f} ms | '
+                f'callback={callback_ms:.1f} ms'
             )
 
         self.get_logger().info(

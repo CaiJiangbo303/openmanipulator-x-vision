@@ -9,7 +9,13 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.time import Time
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    qos_profile_sensor_data,
+    QoSProfile,
+    ReliabilityPolicy,
+    HistoryPolicy,
+    DurabilityPolicy,
+)
 
 
 from sensor_msgs.msg import Image, CameraInfo
@@ -253,11 +259,21 @@ class ObjectLocalizerNode(Node):
             10
         )
 
+        # Fast3D depth stream:
+        # reliable delivery is required because RGB-D matching below
+        # currently requires an exact source timestamp.
+        depth_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=20,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
         self.depth_sub = self.create_subscription(
             Image,
             self.depth_topic,
             self.depth_callback,
-            qos_profile_sensor_data
+            depth_qos
         )
 
         self.output_pub = self.create_publisher(
