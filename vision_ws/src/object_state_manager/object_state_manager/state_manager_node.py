@@ -31,7 +31,16 @@ class TrackState:
 
     confidence: float
 
+    # Original source timestamp.
+    # Keep this for temporal association, filter dt,
+    # Fast3D/Mask3D matching, and source provenance.
     last_stamp: Time
+
+    # Local ROS-clock time when the latest accepted
+    # direct measurement reached this node.
+    # Freshness must not depend on an unreliable
+    # RealSense global-time mapping.
+    last_receipt_stamp: Time
 
     age: int = 1
     missed: int = 0
@@ -425,6 +434,7 @@ class ObjectStateManager(Node):
         measurement,
         confidence,
         stamp,
+        receipt_stamp,
         source_name,
         source_type
     ):
@@ -446,6 +456,7 @@ class ObjectStateManager(Node):
             variance=variance,
             confidence=confidence,
             last_stamp=stamp,
+            last_receipt_stamp=receipt_stamp,
             measurement_source=source_name,
             measurement_source_type=source_type,
         )
@@ -475,6 +486,7 @@ class ObjectStateManager(Node):
         measurement,
         confidence,
         stamp,
+        receipt_stamp,
         source_name,
         source_type
     ):
@@ -579,6 +591,7 @@ class ObjectStateManager(Node):
         )
 
         state.last_stamp = stamp
+        state.last_receipt_stamp = receipt_stamp
         state.age += 1
         state.missed = 0
 
@@ -692,6 +705,11 @@ class ObjectStateManager(Node):
             msg.header.stamp
         )
 
+        # Receipt time is deliberately independent of the
+        # camera source timestamp. On WSL2 the RealSense
+        # global-time mapping can have a large fixed offset.
+        receipt_stamp = self.get_clock().now()
+
         observed_ids = set()
 
         for detection in msg.detections:
@@ -732,6 +750,7 @@ class ObjectStateManager(Node):
                     raw_measurement,
                     confidence,
                     stamp,
+                    receipt_stamp,
                     'fast_bbox_depth',
                     ObjectState.SOURCE_FAST_BBOX_DEPTH
                 )
@@ -820,6 +839,7 @@ class ObjectStateManager(Node):
                 measurement,
                 confidence,
                 stamp,
+                receipt_stamp,
                 source_name,
                 source_type
             )
@@ -846,6 +866,8 @@ class ObjectStateManager(Node):
         stamp = Time.from_msg(
             msg.header.stamp
         )
+
+        receipt_stamp = self.get_clock().now()
 
         for detection in msg.detections:
 
@@ -876,6 +898,7 @@ class ObjectStateManager(Node):
                     precise_measurement,
                     confidence,
                     stamp,
+                    receipt_stamp,
                     'precise_mask_depth',
                     ObjectState.SOURCE_PRECISE_MASK_DEPTH
                 )
@@ -1006,6 +1029,7 @@ class ObjectStateManager(Node):
                 precise_measurement,
                 confidence,
                 stamp,
+                receipt_stamp,
                 'precise_mask_depth',
                 ObjectState.SOURCE_PRECISE_MASK_DEPTH
             )
@@ -1042,10 +1066,12 @@ class ObjectStateManager(Node):
             )
         ):
 
+            # Freshness/lifecycle use local receipt time,
+            # never the RealSense source-clock mapping.
             since_seen = (
                 now.nanoseconds
                 -
-                state.last_stamp.nanoseconds
+                state.last_receipt_stamp.nanoseconds
             ) * 1e-9
 
             if since_seen < 0.0:
@@ -1167,8 +1193,11 @@ class ObjectStateManager(Node):
                 state.confidence
             )
 
+            # last_seen is the local receipt-time view.
+            # source_stamp preserves the original camera
+            # timestamp for provenance and association.
             msg.last_seen = (
-                state.last_stamp.to_msg()
+                state.last_receipt_stamp.to_msg()
             )
 
             msg.source_stamp = (
