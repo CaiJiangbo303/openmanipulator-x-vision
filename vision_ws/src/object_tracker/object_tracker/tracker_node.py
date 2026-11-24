@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from array import array
+import time
 
 from dataclasses import dataclass
 
@@ -20,6 +21,7 @@ class Track:
     bbox: tuple
     missed: int = 0
     age: int = 1
+    last_seen_ns: int = 0
 
 
 @dataclass
@@ -132,6 +134,55 @@ class ObjectTrackerNode(Node):
                 'max_area_ratio'
             ).value
         )
+
+        self.declare_parameter(
+            'enable_occlusion_recovery', False
+        )
+
+        self.declare_parameter(
+            'lost_retention_sec', 3.0
+        )
+
+        self.declare_parameter(
+            'active_timeout_sec', 0.25
+        )
+
+        self.declare_parameter(
+            'active_stream_gap_sec', 0.50
+        )
+
+        self.enable_occlusion_recovery = bool(
+            self.get_parameter(
+                'enable_occlusion_recovery'
+            ).value
+        )
+
+        self.lost_retention_ns = int(
+            float(self.get_parameter(
+                'lost_retention_sec'
+            ).value) * 1e9
+        )
+
+        self.active_timeout_ns = int(
+            float(self.get_parameter(
+                'active_timeout_sec'
+            ).value) * 1e9
+        )
+
+        self.active_stream_gap_ns = int(
+            float(self.get_parameter(
+                'active_stream_gap_sec'
+            ).value) * 1e9
+        )
+
+        if not (
+            0 < self.active_timeout_ns
+            <= self.active_stream_gap_ns
+            < self.lost_retention_ns
+        ):
+            raise ValueError(
+                'Invalid occlusion retention parameters'
+            )
 
         self.fallback_max_missed = int(
             self.get_parameter(
@@ -519,6 +570,7 @@ class ObjectTrackerNode(Node):
             track_id=track_id,
             class_id=class_id,
             bbox=bbox,
+            last_seen_ns=time.monotonic_ns(),
         )
 
         return track_id
@@ -575,6 +627,32 @@ class ObjectTrackerNode(Node):
 
     def callback(self, msg):
 
+        now_ns = time.monotonic_ns()
+        lost_ids = set()
+
+        if self.enable_occlusion_recovery:
+            for track_id, track in list(
+                self.tracks.items()
+            ):
+                elapsed = now_ns - track.last_seen_ns
+
+                if (
+                    elapsed < 0
+                    or elapsed > self.lost_retention_ns
+                ):
+                    del self.tracks[track_id]
+                    continue
+
+                if (
+                    track.missed > self.max_missed
+                    or (
+                        track.missed > 0
+                        and elapsed > self.active_timeout_ns
+                    )
+                    or elapsed > self.active_stream_gap_ns
+                ):
+                    lost_ids.add(track_id)
+
         self.frame_count += 1
 
         detections = list(
@@ -608,6 +686,9 @@ class ObjectTrackerNode(Node):
         for track_id, track in (
             self.tracks.items()
         ):
+
+            if track_id in lost_ids:
+                continue
 
             for info in detection_info:
 
@@ -685,6 +766,9 @@ class ObjectTrackerNode(Node):
         for track_id, track in (
             self.tracks.items()
         ):
+
+            if track_id in lost_ids:
+                continue
 
             if track_id in matched_tracks:
                 continue
@@ -783,6 +867,85 @@ class ObjectTrackerNode(Node):
             )
 
         # ----------------------------------------------
+        # Conservative lost-track recovery.
+        #
+        # Active tracks have already received priority.
+        # Do not use relaxed geometry for lost tracks.
+
+        if self.enable_occlusion_recovery:
+
+            for track_id in sorted(lost_ids):
+
+                track = self.tracks.get(track_id)
+
+                if track is None:
+                    continue
+
+                same_class_tracks = [
+                    t for t in self.tracks.values()
+                    if self.same_class(
+                        t.class_id, track.class_id
+                    )
+                ]
+
+                # Do not recover an ambiguous identity.
+                if len(same_class_tracks) != 1:
+                    continue
+
+                same_class_detections = [
+                    info for info in detection_info
+                    if self.same_class(
+                        track.class_id,
+                        info['class_id']
+                    )
+                ]
+
+                if len(same_class_detections) != 1:
+                    continue
+
+                # A competing tentative identity is
+                # also treated as ambiguity.
+                if any(
+                    self.same_class(
+                        track.class_id,
+                        t.class_id
+                    )
+                    for t in self.tentative_tracks.values()
+                ):
+                    continue
+
+                info = same_class_detections[0]
+                index = info['index']
+
+                if index in matched_detections:
+                    continue
+
+                overlap = self.iou(
+                    track.bbox, info['bbox']
+                )
+
+                ratio = self.area_ratio(
+                    track.bbox, info['bbox']
+                )
+
+                if not (
+                    overlap >= self.iou_threshold
+                    and ratio <= self.max_area_ratio
+                ):
+                    continue
+
+                assignments[index] = track_id
+                matched_tracks.add(track_id)
+                matched_detections.add(index)
+
+                self.get_logger().info(
+                    f'LOST TRACK RECOVERED | '
+                    f'track={track_id} | '
+                    f'gap_ms='
+                    f'{(now_ns-track.last_seen_ns)/1e6:.1f} | '
+                    f'IoU={overlap:.3f}'
+                )
+
         # Update matched tracks.
         # ----------------------------------------------
 
@@ -809,6 +972,7 @@ class ObjectTrackerNode(Node):
             track.bbox = info['bbox']
             track.missed = 0
             track.age += 1
+            track.last_seen_ns = now_ns
 
         # ----------------------------------------------
         # Age unmatched tracks.
@@ -821,11 +985,18 @@ class ObjectTrackerNode(Node):
             if track_id not in matched_tracks:
                 track.missed += 1
 
-            if track.missed > self.max_missed:
+            if self.enable_occlusion_recovery:
+                expired = (
+                    now_ns - track.last_seen_ns
+                    > self.lost_retention_ns
+                )
+            else:
+                expired = (
+                    track.missed > self.max_missed
+                )
 
-                del self.tracks[
-                    track_id
-                ]
+            if expired:
+                del self.tracks[track_id]
 
         # ----------------------------------------------
         # Associate unmatched detections with tentative
