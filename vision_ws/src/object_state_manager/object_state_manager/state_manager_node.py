@@ -4,6 +4,10 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import uuid
+import time
+
+from rclpy.clock import Clock, ClockType
+from .timestamp_guard import TimestampGuard
 
 import numpy as np
 
@@ -44,6 +48,7 @@ class TrackState:
     # Freshness must not depend on an unreliable
     # RealSense global-time mapping.
     last_receipt_stamp: Time
+    last_receipt_steady_ns: int = 0
 
     age: int = 1
     missed: int = 0
@@ -310,6 +315,22 @@ class ObjectStateManager(Node):
         # State database
         # -------------------------------------------------
 
+        self.declare_parameter(
+            'enable_timestamp_guard', False
+        )
+
+        self.guard_enabled = bool(
+            self.get_parameter(
+                'enable_timestamp_guard'
+            ).value
+        )
+
+        self.timestamp_guard = TimestampGuard()
+
+        self.steady_clock = Clock(
+            clock_type=ClockType.STEADY_TIME
+        )
+
         self.tracks = {}
 
         # Raw Fast3D measurements keyed by tracker ID.
@@ -354,7 +375,12 @@ class ObjectStateManager(Node):
         self.timer = (
             self.create_timer(
                 timer_period,
-                self.publish_states
+                self.publish_states,
+                clock=(
+                    self.steady_clock
+                    if self.guard_enabled
+                    else self.get_clock()
+                )
             )
         )
 
@@ -387,6 +413,89 @@ class ObjectStateManager(Node):
     # -----------------------------------------------------
     # Measurement parsing / fusion
     # -----------------------------------------------------
+
+    def handle_time_reset(self, decision):
+        self.tracks.clear()
+        self.fast_history.clear()
+
+        output = ObjectStateArray()
+        output.header.stamp = self.get_clock().now().to_msg()
+        output.header.frame_id = self.world_frame
+
+        self.state_pub.publish(output)
+
+        self.get_logger().warning(
+            f'TIME RESET | '
+            f'epoch={self.timestamp_guard.epoch} | '
+            f'{decision.reason}'
+        )
+
+    def check_guard_clock(self, ros_ns, steady_ns):
+        decision = self.timestamp_guard.check_clock(
+            ros_ns, steady_ns
+        )
+
+        if decision.reset:
+            self.handle_time_reset(decision)
+            return False
+
+        decision = self.timestamp_guard.poll(steady_ns)
+
+        if decision.reset:
+            self.handle_time_reset(decision)
+            return False
+
+        return True
+
+    def accept_guarded_fast(self, msg):
+        now = self.get_clock().now().nanoseconds
+        steady = time.monotonic_ns()
+
+        if not self.check_guard_clock(now, steady):
+            return False
+
+        if msg.header.frame_id != self.world_frame:
+            decision = self.timestamp_guard.invalidate(
+                'fast measurement frame mismatch'
+            )
+            self.handle_time_reset(decision)
+            return False
+
+        stamp = msg.header.stamp
+        source_ns = (
+            int(stamp.sec) * 1000000000
+            + int(stamp.nanosec)
+        )
+
+        was_ready = self.timestamp_guard.ready
+
+        decision = self.timestamp_guard.observe(
+            source_ns, steady
+        )
+
+        if decision.reset:
+            self.handle_time_reset(decision)
+            return False
+
+        if decision.accepted and not was_ready:
+            self.get_logger().info(
+                f'TIME RECOVERED | '
+                f'epoch={self.timestamp_guard.epoch}'
+            )
+
+        return decision.accepted
+
+    def accept_guarded_precise(self, msg):
+        now = self.get_clock().now().nanoseconds
+        steady = time.monotonic_ns()
+
+        if not self.check_guard_clock(now, steady):
+            return False
+
+        return (
+            self.timestamp_guard.ready
+            and msg.header.frame_id == self.world_frame
+        )
 
     def parse_detection(
         self,
@@ -461,6 +570,7 @@ class ObjectStateManager(Node):
             confidence=confidence,
             last_stamp=stamp,
             last_receipt_stamp=receipt_stamp,
+            last_receipt_steady_ns=time.monotonic_ns(),
             measurement_source=source_name,
             measurement_source_type=source_type,
         )
@@ -596,6 +706,7 @@ class ObjectStateManager(Node):
 
         state.last_stamp = stamp
         state.last_receipt_stamp = receipt_stamp
+        state.last_receipt_steady_ns = time.monotonic_ns()
         state.age += 1
         state.missed = 0
 
@@ -705,6 +816,10 @@ class ObjectStateManager(Node):
         msg
     ):
 
+        if self.guard_enabled:
+            if not self.accept_guarded_fast(msg):
+                return
+
         stamp = Time.from_msg(
             msg.header.stamp
         )
@@ -735,6 +850,27 @@ class ObjectStateManager(Node):
             observed_ids.add(
                 track_id
             )
+
+            if self.guard_enabled:
+                old_state = self.tracks.get(track_id)
+
+                if old_state is not None:
+                    source_gap = (
+                        stamp.nanoseconds
+                        - old_state.last_stamp.nanoseconds
+                    )
+
+                    receipt_gap = (
+                        time.monotonic_ns()
+                        - old_state.last_receipt_steady_ns
+                    )
+
+                    if (
+                        source_gap > self.timestamp_guard.timeout_ns
+                        or receipt_gap > self.timestamp_guard.timeout_ns
+                    ):
+                        self.tracks.pop(track_id, None)
+                        self.fast_history.pop(track_id, None)
 
             self.remember_fast_measurement(
                 track_id,
@@ -867,6 +1003,10 @@ class ObjectStateManager(Node):
         msg
     ):
 
+        if self.guard_enabled:
+            if not self.accept_guarded_precise(msg):
+                return
+
         stamp = Time.from_msg(
             msg.header.stamp
         )
@@ -892,6 +1032,35 @@ class ObjectStateManager(Node):
             state = self.tracks.get(
                 track_id
             )
+
+            if self.guard_enabled:
+                history = self.fast_history.get(track_id)
+
+                if state is None or not history:
+                    continue
+
+                source_ns = stamp.nanoseconds
+
+                if not any(
+                    entry[0] == source_ns
+                    for entry in history
+                ):
+                    continue
+
+                lag = state.last_stamp.nanoseconds - source_ns
+
+                if not 0 <= lag <= self.timestamp_guard.jump_ns:
+                    continue
+
+                if source_ns <= state.last_precise_stamp_ns:
+                    continue
+
+                if (
+                    time.monotonic_ns()
+                    - state.last_receipt_steady_ns
+                    > self.timestamp_guard.timeout_ns
+                ):
+                    continue
 
             # Precise-only degradation mode.
             if state is None:
@@ -1051,6 +1220,13 @@ class ObjectStateManager(Node):
     def publish_states(self):
 
         now = self.get_clock().now()
+        steady_ns = time.monotonic_ns()
+
+        if self.guard_enabled:
+            if not self.check_guard_clock(
+                now.nanoseconds, steady_ns
+            ):
+                return
 
         output = ObjectStateArray()
 
@@ -1077,6 +1253,11 @@ class ObjectStateManager(Node):
                 -
                 state.last_receipt_stamp.nanoseconds
             ) * 1e-9
+
+            if self.guard_enabled:
+                since_seen = (
+                    steady_ns - state.last_receipt_steady_ns
+                ) * 1e-9
 
             if since_seen < 0.0:
                 since_seen = 0.0
