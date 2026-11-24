@@ -16,3 +16,15 @@ third_party/sam2/
 vision_ws/*.pt
 .stack_pids
 logs/
+
+# Real hardware workspace generated files
+/real_hw_ws/build/
+/real_hw_ws/install/
+/real_hw_ws/log/
+
+# External senior workspace symlink
+/real_hw_ws/src/dynamixel_interfaces
+
+# Temporary backups and runtime logs
+*.bak_*
+/log/
