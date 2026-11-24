@@ -1,0 +1,19 @@
+object_detector:
+  ros__parameters:
+    backend: "yoloe"
+    image_topic: /camera/camera/color/image_raw
+
+    model: "yoloe-26s-seg.pt"
+
+    confidence: 0.25
+    iou: 0.45
+    imgsz: 640
+
+    device: "0"
+    quantize: "16"
+
+    prompt_mode: "text"
+    prompt_classes: "person, hand, robot arm, blue block, plastic cube, cell phone, cup, bottle, screwdriver, gear, electronic component"
+
+    min_bbox_area: 0.0
+    use_sim_time: false

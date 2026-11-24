@@ -22,6 +22,7 @@ from vision_msgs.msg import (
 )
 
 from .backends.yolo_backend import YOLOBackend
+from .backends.yoloe_backend import YOLOEBackend
 from .backends.color_debug_backend import ColorDebugBackend
 
 
@@ -75,6 +76,16 @@ class ObjectDetectorNode(Node):
         self.declare_parameter(
             'min_bbox_area',
             0.0
+        )
+
+        self.declare_parameter(
+            'prompt_mode',
+            'prompt_free'
+        )
+
+        self.declare_parameter(
+            'prompt_classes',
+            ''
         )
 
         self.backend_name = (
@@ -131,6 +142,25 @@ class ObjectDetectorNode(Node):
                 quantize=self.get_parameter(
                     'quantize'
                 ).value,
+            )
+
+        elif self.backend_name == 'yoloe':
+
+            self.backend = YOLOEBackend(
+                model_path=self.get_parameter('model').value,
+                confidence=float(
+                    self.get_parameter('confidence').value
+                ),
+                iou=float(
+                    self.get_parameter('iou').value
+                ),
+                image_size=int(
+                    self.get_parameter('imgsz').value
+                ),
+                device=self.get_parameter('device').value,
+                quantize=self.get_parameter('quantize').value,
+                prompt_mode=self.get_parameter('prompt_mode').value,
+                prompt_classes=self.get_parameter('prompt_classes').value,
             )
 
         elif self.backend_name == 'color_debug':
