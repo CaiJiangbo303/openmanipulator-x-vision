@@ -1,4 +1,9 @@
 import time
+import os
+import json
+
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 from collections import Counter
 
 import numpy as np
@@ -74,6 +79,36 @@ sources = Counter()
 state_errors = []
 latest = {}
 phase = 'RUNNING'
+
+test_gate = os.environ.get(
+    'VISION_V2_TEST_GATE', '0'
+) == '1'
+
+gate_events = []
+gate_future = None
+gate_input_active = False
+gate_stop_time = None
+
+def gate_status_callback(msg):
+    gate_events.append((
+        time.monotonic(),
+        gate_input_active,
+        gate_future is not None,
+        json.loads(msg.data),
+    ))
+
+if test_gate:
+    gate_client = node.create_client(
+        Trigger,
+        '/state_gate/authorize'
+    )
+
+    gate_sub = node.create_subscription(
+        String,
+        '/state_gate/status',
+        gate_status_callback,
+        10
+    )
 
 input_times = []
 input_ros_times = []
@@ -294,6 +329,14 @@ def detection(stamp):
 
 def connected():
     return (
+        (
+            not test_gate
+            or (
+                gate_client.service_is_ready()
+                and bool(gate_events)
+            )
+        )
+        and
         depth_pub.get_subscription_count() >= 2
         and info_pub.get_subscription_count() >= 2
         and det_pub.get_subscription_count() >= 2
@@ -350,6 +393,8 @@ try:
 
     start = time.monotonic()
 
+    gate_input_active = True
+
     for i in range(40):
 
         input_times.append(time.monotonic())
@@ -382,6 +427,22 @@ try:
         spin_for(
             max(0, next_tick - time.monotonic())
         )
+
+        if (
+            test_gate
+            and i >= 7
+            and gate_future is None
+            and latest.get('valid')
+            and not latest.get('stale')
+        ):
+            print('Requesting explicit target authorization')
+
+            gate_future = gate_client.call_async(
+                Trigger.Request()
+            )
+
+    gate_input_active = False
+    gate_stop_time = time.monotonic()
 
     spin_for(0.15)
 
@@ -555,6 +616,136 @@ try:
         'Lost transition':
             lost_state.get('state') == 2,
     }
+
+    if test_gate:
+
+        allowed = [
+            event for event in gate_events
+            if event[3].get('authorized') is True
+        ]
+
+        first_allow = next(
+            (
+                i for i, event in enumerate(gate_events)
+                if event[3].get('authorized') is True
+            ),
+            None
+        )
+
+        following = (
+            gate_events[first_allow + 1:]
+            if first_allow is not None
+            else []
+        )
+
+        premature_holds = [
+            event for event in following
+            if event[1]
+            and not event[3].get('authorized')
+        ]
+
+        stopped_holds = [
+            event for event in following
+            if not event[1]
+            and not event[3].get('authorized')
+        ]
+
+        service_ok = (
+            gate_future is not None
+            and gate_future.done()
+            and gate_future.result().success
+        )
+
+        active_allowed = [
+            event for event in allowed
+            if event[1]
+        ]
+
+        allow_duration = (
+            active_allowed[-1][0]
+            - active_allowed[0][0]
+            if len(active_allowed) >= 2
+            else 0.0
+        )
+
+        first_hold = (
+            stopped_holds[0]
+            if stopped_holds
+            else None
+        )
+
+        hold_delay = (
+            first_hold[0] - gate_stop_time
+            if first_hold is not None
+            else float('inf')
+        )
+
+        print()
+        print('===== STATE GATE SUMMARY =====')
+
+        print('Authorization service:', service_ok)
+        print('ALLOW messages:', len(allowed))
+        print('Continuous ALLOW duration:',
+              round(allow_duration, 3), 's')
+        print('Unexpected HOLD:', len(premature_holds))
+        print('HOLD after input stop:',
+              round(hold_delay * 1000, 1), 'ms')
+
+        if first_hold:
+            print('HOLD reason:',
+                  first_hold[3].get('reason'))
+
+        if premature_holds:
+            print('First unexpected HOLD:',
+                  premature_holds[0][3])
+
+        checks.update({
+            'Gate default HOLD':
+                any(
+                    not e[2]
+                    and not e[3].get('authorized')
+                    for e in gate_events
+                )
+                and not any(
+                    e[3].get('authorized')
+                    for e in gate_events
+                    if not e[2]
+                ),
+
+            'Gate explicit authorization':
+                bool(service_ok),
+
+            'Gate correct target identity':
+                bool(allowed)
+                and all(
+                    e[3].get('locked_id') == 'track_001'
+                    for e in allowed
+                ),
+
+            'Gate sustained authorization':
+                allow_duration >= 2.0,
+
+            'Gate no unexpected HOLD':
+                not premature_holds,
+
+            'Gate timeout revocation':
+                0 <= hold_delay <= 1.0,
+
+            'Gate no automatic recovery':
+                first_hold is not None
+                and not any(
+                    e[3].get('authorized')
+                    for e in gate_events
+                    if e[0] > first_hold[0]
+                ),
+
+            'Gate bench-only mode':
+                bool(gate_events)
+                and all(
+                    e[3].get('bench_only') is True
+                    for e in gate_events
+                ),
+        })
 
     for name, passed in checks.items():
         print(

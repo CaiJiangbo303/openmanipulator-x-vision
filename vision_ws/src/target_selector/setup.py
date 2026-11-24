@@ -33,6 +33,7 @@ setup(
 
     entry_points={
         'console_scripts': [
+            'state_gate = target_selector.state_gate_node:main',
             (
                 'target_selector = '
                 'target_selector.selector_node:main'
