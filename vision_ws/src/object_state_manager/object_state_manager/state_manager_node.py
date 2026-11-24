@@ -8,6 +8,7 @@ import time
 
 from rclpy.clock import Clock, ClockType
 from .timestamp_guard import TimestampGuard
+from .adaptive_cv_filter import AdaptiveCVFilter
 
 import numpy as np
 
@@ -67,6 +68,8 @@ class TrackState:
 
     precise_bias_valid: bool = False
     last_precise_stamp_ns: int = -1
+
+    adaptive_filter: AdaptiveCVFilter | None = None
 
 
 class ObjectStateManager(Node):
@@ -325,6 +328,57 @@ class ObjectStateManager(Node):
             ).value
         )
 
+        self.declare_parameter(
+            'filter_backend', 'alpha_beta'
+        )
+
+        self.filter_backend = str(
+            self.get_parameter('filter_backend').value
+        )
+
+        adaptive_defaults = {
+            'q_low': 1e-4,
+            'q_high': 1e-3,
+            'measurement_std': 2e-4,
+            'nis_threshold': 11.345,
+            'boost_duration': 0.20,
+        }
+
+        self.adaptive_config = {}
+
+        for name, default in adaptive_defaults.items():
+            parameter = 'adaptive_' + name
+
+            self.declare_parameter(parameter, default)
+
+            self.adaptive_config[name] = float(
+                self.get_parameter(parameter).value
+            )
+
+        if self.filter_backend not in (
+            'alpha_beta', 'adaptive_cv'
+        ):
+            raise ValueError(
+                f'Unknown filter backend: {self.filter_backend}'
+            )
+
+        if self.filter_backend == 'adaptive_cv':
+
+            if not self.guard_enabled:
+                raise ValueError(
+                    'adaptive_cv requires timestamp guard'
+                )
+
+            # Validate all parameters before starting ROS interfaces.
+            AdaptiveCVFilter(
+                np.zeros(3),
+                **self.adaptive_config
+            )
+
+        self.get_logger().info(
+            f'Filter backend: {self.filter_backend}'
+        )
+
         self.timestamp_guard = TimestampGuard()
 
         self.steady_clock = Clock(
@@ -575,6 +629,13 @@ class ObjectStateManager(Node):
             measurement_source_type=source_type,
         )
 
+        if self.filter_backend == 'adaptive_cv':
+
+            state.adaptive_filter = AdaptiveCVFilter(
+                measurement,
+                **self.adaptive_config
+            )
+
         self.tracks[
             track_id
         ] = state
@@ -617,7 +678,43 @@ class ObjectStateManager(Node):
         if dt < -1e-6:
             return False
 
-        if dt <= 1e-4:
+        if state.adaptive_filter is not None:
+
+            filt = state.adaptive_filter
+
+            if not 0.0001 < dt <= 0.25:
+                return False
+
+            residual = (
+                measurement
+                - filt.position
+                - filt.velocity * dt
+            )
+
+            try:
+                filt.step(measurement, dt)
+
+            except (
+                ValueError,
+                FloatingPointError,
+                np.linalg.LinAlgError
+            ) as exc:
+
+                self.get_logger().warning(
+                    f'Adaptive filter rejected '
+                    f'{state.track_id}: {exc}'
+                )
+
+                return False
+
+            state.position = filt.position
+
+            if state.precise_bias_valid:
+                state.position += state.precise_bias
+
+            state.velocity = filt.velocity
+
+        elif dt <= 1e-4:
 
             residual = (
                 measurement
@@ -973,16 +1070,35 @@ class ObjectStateManager(Node):
                     ObjectState.SOURCE_FAST_BBOX_DEPTH
                 )
 
-            self.update_track(
+            filter_measurement = (
+                raw_measurement
+                if state.adaptive_filter is not None
+                else measurement
+            )
+
+            accepted = self.update_track(
                 state,
                 class_id,
-                measurement,
+                filter_measurement,
                 confidence,
                 stamp,
                 receipt_stamp,
                 source_name,
                 source_type
             )
+
+            if (
+                not accepted
+                and state.adaptive_filter is not None
+            ):
+                # Discard the invalid lifecycle.
+                # A future accepted frame starts a new generation.
+                self.tracks.pop(track_id, None)
+                self.fast_history.pop(track_id, None)
+
+                self.get_logger().warning(
+                    f'ADAPTIVE RESET | track={track_id}'
+                )
 
         # Missing-count bookkeeping follows the high-rate
         # primary path only. Slow precise callbacks must not
@@ -1157,15 +1273,27 @@ class ObjectStateManager(Node):
                 # the current filter state. Do not rewind
                 # state.last_stamp to the delayed precise
                 # frame.
-                state.position = (
-                    state.position
-                    +
-                    (
-                        new_bias
-                        -
-                        old_bias
+                if state.adaptive_filter is not None:
+
+                    # Position correction only.
+                    # Do not modify KF velocity, covariance,
+                    # or the internal raw-motion position.
+                    state.position = (
+                        state.adaptive_filter.position
+                        + new_bias
                     )
-                )
+
+                else:
+
+                    state.position = (
+                        state.position
+                        +
+                        (
+                            new_bias
+                            -
+                            old_bias
+                        )
+                    )
 
                 state.class_id = class_id
 
@@ -1196,6 +1324,9 @@ class ObjectStateManager(Node):
             # measurement may still update the state if it
             # is newer. Old unmatched precise frames are
             # intentionally rejected.
+            if state.adaptive_filter is not None:
+                continue
+
             accepted = self.update_track(
                 state,
                 class_id,
