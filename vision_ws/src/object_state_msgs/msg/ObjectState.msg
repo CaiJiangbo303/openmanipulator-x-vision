@@ -9,6 +9,8 @@ uint8 SOURCE_PRECISE_MASK_DEPTH=2
 uint8 SOURCE_FUSED=3
 
 string track_id
+# Unique identity of this state lifecycle.
+string generation_id
 string class_id
 
 geometry_msgs/Point position

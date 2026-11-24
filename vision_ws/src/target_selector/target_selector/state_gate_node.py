@@ -173,6 +173,8 @@ class StateGateNode(Node):
             'authorized': authorized,
             'decision': 'ALLOW' if authorized else 'HOLD',
             'locked_id': self.gate.locked_id,
+            'locked_generation_id':
+                self.gate.locked_generation_id,
             'requested_track_id': self.requested_track_id,
             'reason': self.reason,
             'input_count': self.input_count,

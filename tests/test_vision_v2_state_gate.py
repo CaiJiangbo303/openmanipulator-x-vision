@@ -25,6 +25,7 @@ def frame(dt=0, cls='cell phone', track='track_001'):
     set_stamp(msg.header.stamp, NOW + dt)
 
     s = ObjectState()
+    s.generation_id = '11111111-1111-4111-8111-111111111111'
 
     s.track_id = track
     s.class_id = cls
@@ -343,6 +344,58 @@ assert not gate.poll(
 )[0]
 
 report('Clock regression rejection')
+
+
+rejected_case(
+    'Empty generation rejection',
+    lambda m, s: setattr(s, 'generation_id', '')
+)
+
+rejected_case(
+    'Malformed generation rejection',
+    lambda m, s: setattr(
+        s, 'generation_id', 'invalid-uuid'
+    )
+)
+
+gate = armed_gate()
+
+msg = frame(DT)
+
+msg.states[0].generation_id = (
+    '22222222-2222-4222-8222-222222222222'
+)
+
+ok, reason = gate.update(
+    msg, NOW + DT, STEADY + DT
+)
+
+assert not ok
+assert reason == 'target generation changed'
+assert gate.locked_id is None
+assert gate.locked_generation_id is None
+
+report('Same track ID with new generation rejected')
+
+
+assert not gate.update(
+    msg, NOW + DT, STEADY + DT
+)[0]
+
+report('New generation cannot auto-authorize')
+
+
+ok, reason = gate.authorize(
+    msg, 'track_001', NOW + DT, STEADY + DT
+)
+
+assert ok, reason
+
+assert gate.locked_generation_id == (
+    msg.states[0].generation_id
+)
+
+report('Explicit new generation authorization')
 
 
 print()

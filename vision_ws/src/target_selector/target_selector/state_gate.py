@@ -1,4 +1,5 @@
 import math
+import uuid
 
 
 def stamp_ns(stamp):
@@ -37,6 +38,7 @@ class StateGate:
         self.watchdog_ms = watchdog_ms
 
         self.locked_id = None
+        self.locked_generation_id = None
         self.reason = 'not authorized'
 
         self.last_header = None
@@ -51,6 +53,7 @@ class StateGate:
 
     def revoke(self, reason):
         self.locked_id = None
+        self.locked_generation_id = None
         self.reason = reason
 
         return False, reason
@@ -62,6 +65,19 @@ class StateGate:
 
         if not state.track_id:
             return False, 'empty track id'
+
+        generation = state.generation_id
+
+        try:
+            parsed = uuid.UUID(generation)
+        except (ValueError, TypeError, AttributeError):
+            return False, 'invalid generation id'
+
+        if (
+            parsed.version != 4
+            or str(parsed) != generation
+        ):
+            return False, 'invalid generation id'
 
         cls = state.class_id.strip().lower()
 
@@ -234,6 +250,7 @@ class StateGate:
             return self.revoke(reason)
 
         self.locked_id = track_id
+        self.locked_generation_id = state.generation_id
         self.last_source = None
 
         self.record(
@@ -298,6 +315,9 @@ class StateGate:
 
         if not ok:
             return self.revoke(reason)
+
+        if state.generation_id != self.locked_generation_id:
+            return self.revoke('target generation changed')
 
         if stamp_ns(msg.header.stamp) <= self.last_header:
             return self.revoke(

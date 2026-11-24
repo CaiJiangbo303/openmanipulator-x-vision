@@ -3,6 +3,8 @@
 from collections import deque
 from dataclasses import dataclass, field
 
+import uuid
+
 import numpy as np
 
 import rclpy
@@ -22,6 +24,7 @@ from object_state_msgs.msg import (
 class TrackState:
 
     track_id: str
+    generation_id: str
     class_id: str
 
     position: np.ndarray
@@ -446,6 +449,7 @@ class ObjectStateManager(Node):
         )
 
         state = TrackState(
+            generation_id=str(uuid.uuid4()),
             track_id=track_id,
             class_id=class_id,
             position=measurement.copy(),
@@ -1134,6 +1138,7 @@ class ObjectStateManager(Node):
             )
 
             msg = ObjectState()
+            msg.generation_id = state.generation_id
 
             msg.track_id = (
                 state.track_id

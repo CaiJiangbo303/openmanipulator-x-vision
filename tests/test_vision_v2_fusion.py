@@ -79,6 +79,7 @@ sources = Counter()
 state_errors = []
 latest = {}
 phase = 'RUNNING'
+generation_ids = set()
 
 test_gate = os.environ.get(
     'VISION_V2_TEST_GATE', '0'
@@ -162,6 +163,8 @@ def state_cb(msg):
             found = True
 
             if phase == 'RUNNING':
+
+                generation_ids.add(s.generation_id)
 
                 state_times.append(time.monotonic())
 
@@ -567,7 +570,14 @@ try:
         running_interruptions
     )
 
+    print('Observed generation IDs:',
+          sorted(generation_ids))
+
     checks = {
+        'Generation identity continuity':
+            len(generation_ids) == 1
+            and '' not in generation_ids,
+
         'Input timing continuity':
             timing_ok(input_times),
 

@@ -111,7 +111,8 @@ def main():
 
     def send_frame(
         ids=('track_001',),
-        cls='blue block'
+        cls='blue block',
+        generation='11111111-1111-4111-8111-111111111111'
     ):
 
         previous = latest.get('input_count', 0)
@@ -129,6 +130,7 @@ def main():
         for track_id in ids:
 
             s = ObjectState()
+            s.generation_id = generation
 
             s.track_id = track_id
             s.class_id = cls
@@ -252,6 +254,43 @@ def main():
         )
 
         report('Explicit reauthorization')
+
+        old_generation = latest['locked_generation_id']
+
+        new_generation = (
+            '22222222-2222-4222-8222-222222222222'
+        )
+
+        assert old_generation != new_generation
+
+        send_frame(generation=new_generation)
+
+        assert not latest['authorized']
+        assert latest['locked_generation_id'] is None
+        assert latest['reason'] == 'target generation changed'
+
+        report('Generation change revokes ROS authorization')
+
+        send_frame(generation=new_generation)
+
+        assert not latest['authorized']
+
+        report('Generation change cannot auto-authorize')
+
+        response = call(authorize)
+
+        assert response.success, response.message
+
+        wait_until(
+            lambda: latest.get('authorized') is True
+        )
+
+        assert (
+            latest['locked_generation_id']
+            == new_generation
+        )
+
+        report('New generation explicitly authorized')
 
         # Stop publishing and let the steady timer
         # invalidate the previous authorization.
