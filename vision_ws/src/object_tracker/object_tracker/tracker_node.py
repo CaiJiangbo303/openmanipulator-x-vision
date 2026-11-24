@@ -158,6 +158,15 @@ class ObjectTrackerNode(Node):
             ).value
         )
 
+        self.declare_parameter(
+            'class_alias_groups',
+            ''
+        )
+
+        self.class_alias_map = self.parse_class_alias_groups(
+            self.get_parameter('class_alias_groups').value
+        )
+
         self.next_track_id = 1
         self.tracks = {}
 
@@ -190,6 +199,42 @@ class ObjectTrackerNode(Node):
         self.get_logger().info(
             f'Output: {self.output_topic}'
         )
+
+    @staticmethod
+    def parse_class_alias_groups(value):
+        aliases = {}
+
+        for group in value.split(';'):
+            names = [
+                name.strip().lower()
+                for name in group.split('|')
+                if name.strip()
+            ]
+
+            if not names:
+                continue
+
+            canonical = names[0]
+
+            for name in names:
+                if name in aliases and aliases[name] != canonical:
+                    raise ValueError(
+                        f'Conflicting class alias: {name}'
+                    )
+
+                aliases[name] = canonical
+
+        return aliases
+
+    def class_key(self, class_id):
+        name = str(class_id)
+        return self.class_alias_map.get(
+            name.strip().lower(),
+            name
+        )
+
+    def same_class(self, a, b):
+        return self.class_key(a) == self.class_key(b)
 
     @staticmethod
     def bbox_xyxy(detection):
@@ -509,9 +554,7 @@ class ObjectTrackerNode(Node):
             for info in detection_info:
 
                 if (
-                    track.class_id
-                    !=
-                    info['class_id']
+                    not self.same_class(track.class_id, info['class_id'])
                 ):
                     continue
 
@@ -609,9 +652,7 @@ class ObjectTrackerNode(Node):
                     continue
 
                 if (
-                    track.class_id
-                    !=
-                    info['class_id']
+                    not self.same_class(track.class_id, info['class_id'])
                 ):
                     continue
 
@@ -756,9 +797,7 @@ class ObjectTrackerNode(Node):
                     continue
 
                 if (
-                    tentative.class_id
-                    !=
-                    info['class_id']
+                    not self.same_class(tentative.class_id, info['class_id'])
                 ):
                     continue
 
@@ -992,9 +1031,7 @@ class ObjectTrackerNode(Node):
                     continue
 
                 if (
-                    confirmed.class_id
-                    !=
-                    tentative.class_id
+                    not self.same_class(confirmed.class_id, tentative.class_id)
                 ):
                     continue
 
