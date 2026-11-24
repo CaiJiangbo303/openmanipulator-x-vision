@@ -175,8 +175,8 @@ exec ros2 launch \
   enable_depth:=true \
   enable_sync:=true \
   align_depth.enable:=true \
-  rgb_camera.color_profile:=640x480x6 \
-  depth_module.depth_profile:=640x480x6 \
+  rgb_camera.color_profile:=640x480x30 \
+  depth_module.depth_profile:=640x480x30 \
   wait_for_device_timeout:=10.0
 "
 
