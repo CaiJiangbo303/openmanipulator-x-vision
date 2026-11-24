@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
 
 import numpy as np
 
@@ -11,6 +11,9 @@ class Detection:
     class_name: str
     confidence: float
     bbox_xyxy: Tuple[float, float, float, float]
+    mask: Optional[np.ndarray] = field(
+        default=None, repr=False, compare=False
+    )
 
 
 class DetectorBackend(ABC):

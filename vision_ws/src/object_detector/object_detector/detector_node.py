@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from array import array
+
 from time import perf_counter
 
 import numpy as np
@@ -21,6 +23,7 @@ from vision_msgs.msg import (
     ObjectHypothesisWithPose,
 )
 
+from .native_mask import build_label_map
 from .backends.yolo_backend import YOLOBackend
 from .backends.yoloe_backend import YOLOEBackend
 from .backends.color_debug_backend import ColorDebugBackend
@@ -88,6 +91,12 @@ class ObjectDetectorNode(Node):
             ''
         )
 
+        self.declare_parameter('enable_native_mask', False)
+
+        self.enable_native_mask = bool(
+            self.get_parameter('enable_native_mask').value
+        )
+
         self.backend_name = (
             self.get_parameter(
                 'backend'
@@ -109,6 +118,9 @@ class ObjectDetectorNode(Node):
         # --------------------------------------------------
         # Backend selection
         # --------------------------------------------------
+
+        if self.enable_native_mask and self.backend_name != 'yoloe':
+            raise ValueError("Native mask mode requires YOLOE")
 
         if self.backend_name == 'yolo':
 
@@ -161,6 +173,7 @@ class ObjectDetectorNode(Node):
                 quantize=self.get_parameter('quantize').value,
                 prompt_mode=self.get_parameter('prompt_mode').value,
                 prompt_classes=self.get_parameter('prompt_classes').value,
+                enable_native_mask=self.enable_native_mask,
             )
 
         elif self.backend_name == 'color_debug':
@@ -209,6 +222,15 @@ class ObjectDetectorNode(Node):
                 image_qos
             )
         )
+
+        self.native_mask_pub = None
+
+        if self.enable_native_mask:
+            self.native_mask_pub = self.create_publisher(
+                Image,
+                '/object_detector/native_instance_mask',
+                10
+            )
 
         self.frame_count = 0
 
@@ -309,6 +331,9 @@ class ObjectDetectorNode(Node):
             detections
         )
 
+        if self.native_mask_pub is not None:
+            self.publish_native_mask(msg, detections)
+
         if debug_bgr is not None:
 
             self.publish_debug_image(
@@ -357,7 +382,7 @@ class ObjectDetectorNode(Node):
             source_msg.header
         )
 
-        for det in detections:
+        for index, det in enumerate(detections, start=1):
 
             detection_msg = (
                 Detection2D()
@@ -415,7 +440,10 @@ class ObjectDetectorNode(Node):
             )
 
             # Detector does not own persistent IDs.
-            detection_msg.id = ''
+            detection_msg.id = (
+                f'det_{index:05d}'
+                if self.enable_native_mask else ''
+            )
 
             array_msg.detections.append(
                 detection_msg
@@ -424,6 +452,32 @@ class ObjectDetectorNode(Node):
         self.detection_pub.publish(
             array_msg
         )
+
+    def publish_native_mask(self, source_msg, detections):
+        try:
+            labels = build_label_map(
+                detections,
+                source_msg.height,
+                source_msg.width
+            )
+        except ValueError as exc:
+            self.get_logger().warning(
+                f'Native mask rejected: {exc}'
+            )
+            return
+
+        out = Image()
+        out.header = source_msg.header
+        out.height = source_msg.height
+        out.width = source_msg.width
+        out.encoding = 'mono16'
+        out.is_bigendian = False
+        out.step = out.width * 2
+        payload = array('B')
+        payload.frombytes(labels.tobytes())
+        out.data = payload
+
+        self.native_mask_pub.publish(out)
 
     def publish_debug_image(
         self,

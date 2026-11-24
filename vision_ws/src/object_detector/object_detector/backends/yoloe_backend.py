@@ -18,6 +18,7 @@ class YOLOEBackend(DetectorBackend):
         quantize: str = '16',
         prompt_mode: str = 'prompt_free',
         prompt_classes: str = '',
+        enable_native_mask: bool = False,
     ):
         from ultralytics import YOLOE
 
@@ -26,6 +27,7 @@ class YOLOEBackend(DetectorBackend):
         self.iou = iou
         self.image_size = image_size
         self.prompt_mode = prompt_mode
+        self.enable_native_mask = enable_native_mask
 
         self.classes = list(dict.fromkeys(
             name.strip()
@@ -88,6 +90,7 @@ class YOLOEBackend(DetectorBackend):
             device=self.device,
             quantize=self.quantize,
             verbose=False,
+            retina_masks=self.enable_native_mask,
         )
 
         result = results[0]
@@ -100,8 +103,27 @@ class YOLOEBackend(DetectorBackend):
         classes = result.boxes.cls.detach().cpu().numpy()
         scores = result.boxes.conf.detach().cpu().numpy()
 
-        for bbox, cls, score in zip(
-            boxes, classes, scores
+        masks = None
+
+        if self.enable_native_mask and result.masks is not None:
+            raw = result.masks.data
+
+            if isinstance(raw, torch.Tensor):
+                raw = (raw > 0.5).detach().cpu().numpy()
+            else:
+                raw = np.asarray(raw) > 0.5
+
+            expected = (
+                len(boxes),
+                bgr_image.shape[0],
+                bgr_image.shape[1]
+            )
+
+            if raw.shape == expected:
+                masks = raw
+
+        for index, (bbox, cls, score) in enumerate(
+            zip(boxes, classes, scores)
         ):
             class_id = int(cls)
 
@@ -110,6 +132,7 @@ class YOLOEBackend(DetectorBackend):
                     class_id=class_id,
                     class_name=str(result.names[class_id]),
                     confidence=float(score),
+                    mask=None if masks is None else masks[index],
                     bbox_xyxy=tuple(
                         float(v) for v in bbox
                     ),

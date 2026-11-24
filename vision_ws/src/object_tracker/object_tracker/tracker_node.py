@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 
+from array import array
+
 from dataclasses import dataclass
 
 import rclpy
 from rclpy.node import Node
 
 from vision_msgs.msg import Detection2DArray
+from sensor_msgs.msg import Image
+
+from .native_mask_join import NativeMaskJoin
 
 
 @dataclass
@@ -185,6 +190,31 @@ class ObjectTrackerNode(Node):
             self.output_topic,
             10
         )
+
+        self.declare_parameter('enable_native_mask', False)
+
+        self.native_mask_join = None
+        self.native_mask_pub = None
+
+        if self.get_parameter('enable_native_mask').value:
+            self.native_mask_join = NativeMaskJoin()
+
+            self.native_mask_sub = self.create_subscription(
+                Image,
+                '/object_detector/native_instance_mask',
+                self.native_mask_callback,
+                10
+            )
+
+            self.native_mask_pub = self.create_publisher(
+                Image,
+                '/object_tracker/native_instance_mask',
+                10
+            )
+
+            self.get_logger().info(
+                'Native mask association enabled'
+            )
 
         self.frame_count = 0
 
@@ -514,6 +544,34 @@ class ObjectTrackerNode(Node):
         )
 
         return tentative_id
+
+    def native_mask_callback(self, msg):
+        try:
+            pair = self.native_mask_join.add_mask(msg)
+            self.publish_native_pair(pair)
+        except ValueError as exc:
+            self.get_logger().warning(
+                f'Native mask rejected: {exc}'
+            )
+
+    def publish_native_pair(self, pair):
+        if pair is None or self.native_mask_pub is None:
+            return
+
+        source, labels = pair
+
+        out = Image()
+        out.header = source.header
+        out.height = source.height
+        out.width = source.width
+        out.encoding = 'mono16'
+        out.is_bigendian = False
+        out.step = source.width * 2
+        payload = array('B')
+        payload.frombytes(labels.tobytes())
+        out.data = payload
+
+        self.native_mask_pub.publish(out)
 
     def callback(self, msg):
 
@@ -1087,6 +1145,20 @@ class ObjectTrackerNode(Node):
         # Publish current detections with persistent IDs.
         # ----------------------------------------------
 
+        native_pair = None
+
+        if self.native_mask_join is not None:
+            try:
+                native_pair = self.native_mask_join.add_assignments(
+                    msg.header,
+                    detections,
+                    assignments
+                )
+            except ValueError as exc:
+                self.get_logger().warning(
+                    f'Native mapping rejected: {exc}'
+                )
+
         output = Detection2DArray()
         output.header = msg.header
 
@@ -1110,6 +1182,8 @@ class ObjectTrackerNode(Node):
         self.pub.publish(
             output
         )
+
+        self.publish_native_pair(native_pair)
 
         if self.frame_count % 20 == 0:
 
