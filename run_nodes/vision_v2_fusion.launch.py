@@ -1,13 +1,13 @@
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
+def build_nodes(context):
 
     root = Path(__file__).resolve().parents[1]
 
@@ -52,6 +52,51 @@ def generate_launch_description():
         ]
     )
 
+    enable_filter = IfCondition(
+        LaunchConfiguration('enable_self_filter')
+    ).evaluate(context)
+
+    fast_topic = '/object_localizer/detections_3d_fast'
+    precise_topic = '/object_localizer/detections_3d_mask'
+
+    filters = []
+
+    if enable_filter:
+
+        def make_filter(name, input_topic, output_topic, timeout):
+
+            return Node(
+                package='object_self_filter',
+                executable='object_self_filter',
+                name=name,
+                output='screen',
+                parameters=[{
+                    'use_sim_time': False,
+                    'world_frame': frame,
+                    'input_topic': input_topic,
+                    'output_topic': output_topic,
+                    'tf_wait_timeout': timeout,
+                }]
+            )
+
+        filters = [
+            make_filter(
+                'self_filter_fast',
+                fast_topic,
+                '/object_self_filter/detections_3d_fast',
+                0.12
+            ),
+            make_filter(
+                'self_filter_precise',
+                precise_topic,
+                '/object_self_filter/detections_3d_mask',
+                0.20
+            ),
+        ]
+
+        fast_topic = '/object_self_filter/detections_3d_fast'
+        precise_topic = '/object_self_filter/detections_3d_mask'
+
     state_manager = Node(
         package='object_state_manager',
         executable='object_state_manager',
@@ -63,11 +108,9 @@ def generate_launch_description():
 
                 'world_frame': frame,
 
-                'fast_measurement_topic':
-                    '/object_localizer/detections_3d_fast',
+                'fast_measurement_topic': fast_topic,
 
-                'precise_measurement_topic':
-                    '/object_localizer/detections_3d_mask',
+                'precise_measurement_topic': precise_topic,
 
                 'output_topic':
                     '/object_state_manager/states',
@@ -122,6 +165,17 @@ def generate_launch_description():
         ]
     )
 
+    return [
+        state_gate,
+        fast3d,
+        mask3d,
+        *filters,
+        state_manager,
+    ]
+
+
+def generate_launch_description():
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'enable_state_gate',
@@ -131,8 +185,9 @@ def generate_launch_description():
             'requested_track_id',
             default_value=''
         ),
-        state_gate,
-        fast3d,
-        mask3d,
-        state_manager,
+        DeclareLaunchArgument(
+            'enable_self_filter',
+            default_value='false'
+        ),
+        OpaqueFunction(function=build_nodes),
     ])

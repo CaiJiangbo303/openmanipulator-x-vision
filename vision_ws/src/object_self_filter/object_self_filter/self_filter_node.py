@@ -2,10 +2,12 @@ from collections import deque
 #!/usr/bin/env python3
 
 import math
+import time
 
 import rclpy
 
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from rclpy.time import Time
 from rclpy.duration import Duration
 
@@ -90,10 +92,11 @@ def point_to_segment_distance(
 
 class ObjectSelfFilter(Node):
 
-    def __init__(self):
+    def __init__(self, **kwargs):
 
         super().__init__(
-            'object_self_filter'
+            'object_self_filter',
+            **kwargs
         )
 
         self.declare_parameter(
@@ -258,9 +261,14 @@ class ObjectSelfFilter(Node):
         self.queue_overflow_count = 0
         self.tf_timeout_drop_count = 0
 
+        self.steady_clock = Clock(
+            clock_type=ClockType.STEADY_TIME
+        )
+
         self.process_timer = self.create_timer(
             0.01,
-            self.process_pending
+            self.process_pending,
+            clock=self.steady_clock
         )
 
         self.frame_count = 0
@@ -291,11 +299,7 @@ class ObjectSelfFilter(Node):
         msg
     ):
 
-        arrival_ns = (
-            self.get_clock()
-            .now()
-            .nanoseconds
-        )
+        arrival_ns = time.monotonic_ns()
 
         if self.pending_message is None:
 
@@ -364,11 +368,16 @@ class ObjectSelfFilter(Node):
             transform.transform.translation
         )
 
-        return (
+        position = (
             float(translation.x),
             float(translation.y),
             float(translation.z),
         )
+
+        if not all(math.isfinite(v) for v in position):
+            raise ValueError('non-finite robot TF')
+
+        return position
 
     def build_segments(
         self,
@@ -430,92 +439,73 @@ class ObjectSelfFilter(Node):
 
         return segments
 
-    def process_pending(
-        self
-    ):
+    def pending_expired(self):
+
+        if self.pending_since_ns is None:
+            return True
+
+        waited = (
+            time.monotonic_ns()
+            - self.pending_since_ns
+        ) * 1e-9
+
+        return not 0.0 <= waited <= self.tf_wait_timeout
+
+    def drop_expired(self):
+
+        self.tf_timeout_drop_count += 1
+
+        self.get_logger().warning(
+            'Drop measurement: queue/TF deadline expired '
+            f'(total={self.tf_timeout_drop_count})'
+        )
+
+        self.promote_next()
+
+    def process_pending(self):
 
         if self.pending_message is None:
             return
 
         msg = self.pending_message
 
-        if not msg.header.frame_id:
-
-            self.promote_next()
-
+        if self.pending_expired():
+            self.drop_expired()
             return
 
-        if (
-            msg.header.frame_id
-            !=
-            self.world_frame
-        ):
+        if msg.header.frame_id != self.world_frame:
 
             self.get_logger().warning(
-                'Drop measurement: expected '
-                f'frame={self.world_frame}, '
-                f'got={msg.header.frame_id}'
+                'Drop measurement: frame mismatch'
             )
 
             self.promote_next()
-
             return
 
-        stamp = Time.from_msg(
-            msg.header.stamp
-        )
+        stamp = Time.from_msg(msg.header.stamp)
+
+        if stamp.nanoseconds <= 0:
+
+            self.get_logger().warning(
+                'Drop measurement: invalid source timestamp'
+            )
+
+            self.promote_next()
+            return
 
         try:
 
-            segments = self.build_segments(
-                stamp
-            )
+            segments = self.build_segments(stamp)
 
         except Exception:
 
-            now_ns = (
-                self.get_clock()
-                .now()
-                .nanoseconds
-            )
+            if self.pending_expired():
+                self.drop_expired()
 
-            if self.pending_since_ns is None:
+            return
 
-                self.pending_since_ns = now_ns
-
-            waited = (
-                now_ns
-                -
-                self.pending_since_ns
-            ) * 1e-9
-
-            measurement_age = (
-                now_ns
-                -
-                stamp.nanoseconds
-            ) * 1e-9
-
-            if (
-                waited
-                <=
-                self.tf_wait_timeout
-            ):
-
-                return
-
-            self.tf_timeout_drop_count += 1
-
-            self.get_logger().warning(
-                'Drop measurement: exact robot TF '
-                'unavailable '
-                f'after waiting {waited:.3f}s '
-                f'(measurement age='
-                f'{measurement_age:.3f}s, '
-                f'total={self.tf_timeout_drop_count})'
-            )
-
-            self.promote_next()
-
+        if self.pending_expired():
+            self.drop_expired()
             return
 
         self.filter_message(
@@ -615,6 +605,10 @@ class ObjectSelfFilter(Node):
                 float(position.y),
                 float(position.z),
             )
+
+            if not all(math.isfinite(v) for v in point):
+                rejected += 1
+                continue
 
             (
                 is_self,
