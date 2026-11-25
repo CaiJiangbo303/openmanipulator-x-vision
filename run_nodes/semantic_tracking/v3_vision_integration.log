@@ -1,0 +1,61 @@
+/usr/lib/python3/dist-packages/scipy/__init__.py:146: UserWarning: A NumPy version >=1.17.3 and <1.25.0 is required for this version of SciPy (detected version 1.26.4
+  warnings.warn(f"A NumPy version >={np_minversion} and <{np_maxversion}"
+1795599454.371002 [197]    python3: selected interface "lo" is not multicast-capable: disabling multicast
+SHADOW ONLY - NO HARDWARE COMMANDS
+Using virtual joints and virtual TF
+Waiting for initial target...
+HOLD: WAIT INITIAL ACQUISITION
+VIRTUAL TF INITIALIZED
+Initial virtual TCP: [ 0.34311294  0.05343483 -0.08826777]
+Initial virtual target: [ 0.31811294  0.05343483 -0.08826777]
+INITIAL LOCKED: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4')
+RECOVERY STATE: TRACKING | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: True
+
+>>> [0s] 保持方块静止 <<<
+ROLLING PLAN | id=track_222 count=8 q=[-0.1661  0.3888 -0.0108 -0.018 ]
+TRACK blue block/track_222 score=0.67 err=11mm TCP=[+0.329,+0.053] OBJ=[+0.318,+0.053]
+HOLD: aligned 1.4 mm
+HOLD: aligned 1.3 mm
+HOLD: aligned 1.6 mm
+HOLD: aligned 1.4 mm
+HOLD: aligned 1.3 mm
+
+>>> [5s] 缓慢小幅移动方块，不要遮挡 <<<
+HOLD: aligned 1.3 mm
+HOLD: aligned 1.5 mm
+RECOVERY STATE: HOLD | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: False
+RECOVERY STATE: TRACKING | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: True
+ROLLING PLAN | id=track_222 count=19 q=[-0.1677  0.2632  0.1859 -0.0892]
+TRACK blue block/track_222 score=0.46 err=11mm TCP=[+0.313,+0.051] OBJ=[+0.302,+0.049]
+RECOVERY STATE: HOLD | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: False
+RECOVERY STATE: TRACKING | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: True
+RECOVERY STATE: HOLD | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: False
+RECOVERY STATE: TRACKING | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: True
+ROLLING PLAN | id=track_222 count=24 q=[-0.1699  0.1998  0.2788 -0.1186]
+TRACK blue block/track_222 score=0.58 err=3mm TCP=[+0.295,+0.050] OBJ=[+0.291,+0.049]
+HOLD: aligned 2.9 mm
+HOLD: aligned 2.1 mm
+HOLD: aligned 1.6 mm
+HOLD: aligned 1.5 mm
+TRACK blue block/track_222 score=0.82 err=5mm TCP=[+0.277,+0.052] OBJ=[+0.281,+0.055]
+HOLD: aligned 2.5 mm
+ROLLING PLAN | id=track_222 count=50 q=[-0.2109  0.1554  0.3427 -0.1382]
+TRACK blue block/track_222 score=0.79 err=4mm TCP=[+0.294,+0.060] OBJ=[+0.297,+0.061]
+HOLD: aligned 2.7 mm
+RECOVERY STATE: HOLD | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: False
+RECOVERY STATE: RECOVERY_WAIT | identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4') | shadow_authorized: False
+HOLD: RECOVERY_WAIT | TARGET INVALID
+
+===== INTEGRATION SUMMARY =====
+Plans: 53
+Stats: {'TRACKING': 132, 'HOLD': 7, 'RECOVERY_WAIT': 6}
+Hold reasons: {'HOLD: WAIT INITIAL ACQUISITION': 1, 'HOLD: aligned 1.4 mm': 15, 'HOLD: aligned 1.3 mm': 31, 'HOLD: aligned 1.5 mm': 5, 'HOLD: aligned 1.6 mm': 4, 'HOLD: aligned 1.7 mm': 3, 'HOLD: aligned 1.9 mm': 2, 'HOLD: aligned 2.5 mm': 2, 'HOLD: HOLD | TARGET INVALID': 1, 'HOLD: HOLD | DET MISSING OR AMBIGUOUS': 5, 'HOLD: aligned 2.9 mm': 2, 'HOLD: aligned 2.1 mm': 2, 'HOLD: aligned 1.1 mm': 1, 'HOLD: aligned 1.2 mm': 1, 'HOLD: aligned 2.0 mm': 1, 'HOLD: aligned 1.8 mm': 4, 'HOLD: aligned 2.3 mm': 2, 'HOLD: aligned 2.4 mm': 1, 'HOLD: aligned 2.8 mm': 1, 'HOLD: aligned 2.7 mm': 2, 'HOLD: HOLD | LOW CONFIDENCE': 1, 'HOLD: RECOVERY_WAIT | NO TARGET': 5, 'HOLD: RECOVERY_WAIT | TARGET INVALID': 1}
+Identity: ('track_222', 'a7bc6ad9-fe46-4b16-9265-4cba7a32e5e4')
+Final status: RECOVERY_WAIT
+Authorized: False
+Reauthorizations: 0
+Max joint step rad: 0.019997
+Max TCP step mm: 2.501
+Final virtual joints: [-0.21283329  0.18940337  0.2946149  -0.12401827]
+Final virtual TCP: [ 0.3000722   0.0622542  -0.08831165]
+NO HARDWARE MOTION
