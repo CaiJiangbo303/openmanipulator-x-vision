@@ -1,0 +1,5 @@
+# Pair with vision_v2_fusion.launch.py enable_self_filter:=true.
+real_visual_tracker_fused_v2:
+  ros__parameters:
+    state_topic: /object_state_manager/states
+    mask_topic: /object_self_filter/detections_3d_mask
